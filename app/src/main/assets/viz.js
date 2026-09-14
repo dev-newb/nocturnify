@@ -8,12 +8,14 @@
 // quantised from the cover art's actual pixels.
 (function () {
   const W = 1280, H = 720;
-  const NPART = 240;
+  const NPART = 170;          // was 240 — less CPU for the audio thread to compete with
+  const FPS = 30;             // ambient drift reads identically at 30; halves per-frame work
   const MODES = ['Drift', 'Orbit', 'Aurora'];
   const ART_CY = H * 0.355, ART_SZ = 268;
 
   let cv, ctx, raf = 0, opts = null, running = false;
-  let parts = [], sprites = [], curtains = [], pal = null, prevPal = null, palMix = 1;
+  let parts = [], sprites = [], curtains = [], glow = null, pal = null, prevPal = null, palMix = 1;
+  let lastDraw = 0;
   let artImg = null, artUrl = '', lastTrack = '';
   let seed = 1, tPrev = 0, tNow = 0, mode = 0, modeUntil = 0, seekPreview = null, seekShown = null;
 
@@ -66,6 +68,17 @@
       return s;
     });
     // one soft vertical strip per accent colour (pre-tinted: 'lighter' can't colourise a white sprite)
+    // the art glow was a fresh createRadialGradient + large alpha fillRect every single frame;
+    // bake it once per palette and just blit it
+    glow = document.createElement('canvas'); glow.width = glow.height = 256;
+    {
+      const g = glow.getContext('2d');
+      const a = p.acc[0] || [120, 140, 180];
+      const rg = g.createRadialGradient(128, 128, 34, 128, 128, 128);
+      rg.addColorStop(0, `rgba(${a[0] | 0},${a[1] | 0},${a[2] | 0},0.42)`);
+      rg.addColorStop(1, 'rgba(0,0,0,0)');
+      g.fillStyle = rg; g.fillRect(0, 0, 256, 256);
+    }
     curtains = p.acc.map(c => {
       const s = document.createElement('canvas'); s.width = 64; s.height = 256;
       const g = s.getContext('2d');
@@ -140,12 +153,7 @@
 
   function drawArt(cx, cy, size) {
     if (!artImg) return;
-    const a = pal.acc[0] || [120, 140, 180];
-    const g = ctx.createRadialGradient(cx, cy, size * 0.30, cx, cy, size * 1.15);
-    g.addColorStop(0, `rgba(${a[0] | 0},${a[1] | 0},${a[2] | 0},0.42)`);
-    g.addColorStop(1, 'rgba(0,0,0,0)');
-    ctx.fillStyle = g;
-    ctx.fillRect(cx - size * 1.2, cy - size * 1.2, size * 2.4, size * 2.4);
+    if (glow) { const r = size * 1.15; ctx.drawImage(glow, cx - r, cy - r, r * 2, r * 2); }
     const x = cx - size / 2, y = cy - size / 2;
     ctx.save(); ctx.beginPath();
     if (ctx.roundRect) ctx.roundRect(x, y, size, size, 14); else ctx.rect(x, y, size, size);
@@ -189,6 +197,8 @@
   function frame(ts) {
     if (!running) return;
     raf = requestAnimationFrame(frame);
+    if (ts - lastDraw < 1000 / FPS - 1) return;      // frame cap
+    lastDraw = ts;
     const st = opts.state() || {};
     if (!tPrev) tPrev = ts;
     let dt = (ts - tPrev) / 1000; tPrev = ts;
@@ -212,7 +222,7 @@
     const prog = st.duration ? Math.min(1, st.position / st.duration) : 0;
 
     ctx.globalCompositeOperation = 'source-over';
-    ctx.fillStyle = `rgba(${bg[0] | 0},${bg[1] | 0},${bg[2] | 0},${mode === 2 ? 0.09 : 0.135})`;
+    ctx.fillStyle = `rgba(${bg[0] | 0},${bg[1] | 0},${bg[2] | 0},${mode === 2 ? 0.17 : 0.25})`;
     ctx.fillRect(0, 0, W, H);
 
     drawParticles(dt, moving, 0.75 + prog * 0.8);
