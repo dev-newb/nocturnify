@@ -17,7 +17,7 @@
   const ART_CY = H * 0.355, ART_SZ = 268;
 
   let cv, ctx, raf = 0, opts = null, running = false;
-  let poolA = [], poolB = [], sprites = [], curtains = [], rings = [], glow = null, pal = null, prevPal = null, palMix = 1;
+  let poolA = [], poolB = [], sprites = [], curtains = [], rings = [], sharps = [], glow = null, pal = null, prevPal = null, palMix = 1;
   let autoIdx = 0, autoT = 0, autoNextReady = -1;
   // accents from a near-black cover are almost invisible as thin strokes; lift them a little
   const lift = (c, m = 0.38) => [c[0] + (255 - c[0]) * m, c[1] + (255 - c[1]) * m, c[2] + (255 - c[2]) * m];
@@ -85,6 +85,19 @@
       rg.addColorStop(1, 'rgba(0,0,0,0)');
       g.fillStyle = rg; g.fillRect(0, 0, 256, 256);
     }
+    // A crisp point: bright opaque core with a fast falloff, for the sharp quarter of stars
+    sharps = p.acc.map(c => {
+      const s = document.createElement('canvas'); s.width = s.height = 32;
+      const g = s.getContext('2d');
+      const col = `${c[0] | 0},${c[1] | 0},${c[2] | 0}`;
+      const rg = g.createRadialGradient(16, 16, 0, 16, 16, 16);
+      rg.addColorStop(0.00, `rgba(${col},1)`);
+      rg.addColorStop(0.34, `rgba(${col},0.92)`);
+      rg.addColorStop(0.52, `rgba(${col},0.22)`);
+      rg.addColorStop(1.00, `rgba(${col},0)`);
+      g.fillStyle = rg; g.fillRect(0, 0, 32, 32);
+      return s;
+    });
     // Bloom draws rings, not blobs, so it doesn't read as "Drift in a circle"
     rings = p.acc.map(c => {
       const s = document.createElement('canvas'); s.width = s.height = 64;
@@ -143,7 +156,9 @@
       p.rl = 12 + rnd() * 70; p.rw = 1.6 + rnd() * 4.4; p.rd = (rnd() - 0.5) * 18;
       // Bloom: orbiting seed point mirrored around the centre
       p.br = 40 + rnd() * 300; p.ba = rnd() * Math.PI * 2; p.bs = (0.15 + rnd() * 0.5) * (rnd() < 0.5 ? -1 : 1);
-      p.br0 = p.br; p.esc = 0; p.escArc = 0;   // home radius; escape stage 0=orbit 1=drift 2=rim
+      p.br0 = p.br; p.esc = 0;
+      p.escK = 0.25 + rnd() * rnd() * 15.75;   // escape swell: mostly slight, occasionally huge
+      p.stroked = rnd() < 0.25;                // a quarter of stars draw as stroked segments
     }
   }
 
@@ -225,8 +240,10 @@
   // are drawn as depth-scaled dots and the streaks come from the trail persistence instead —
   // the smear IS the motion blur. One star is occasionally promoted to a comet: same radial
   // path, just larger and brighter with a tail of fading sprites.
+  const SB_A = [0.40, 0.66, 0.92], SB_W = [1.1, 2.0, 3.4];   // stroked stars, per depth band
   function mStars(pool, w, dt, mv) {
     ctx.globalCompositeOperation = 'lighter';
+    ctx.lineCap = 'round';
     const ns = Math.max(1, sprites.length);
     let cometCount = 0, comet = null;
     for (const p of pool) if (p.comet) cometCount++;
@@ -238,28 +255,73 @@
       if (p.z < 0.06 || x < -220 || x > W + 220 || y < -220 || y > H + 220) {
         if (p.comet) { p.comet = false; cometCount--; }
         p.dx = (rnd() - 0.5) * 2; p.dy = (rnd() - 0.5) * 2; p.z = 1; p.tail = null;
-        if (cometCount === 0 && rnd() < 0.04) { p.comet = true; p.tail = []; cometCount++; }
+        // cx/cy must go too: the final pass copies them into sx/sy, and a stale value would
+        // be stroked next frame as a line from the old position to the new spawn point.
+        p.sx = null; p.sy = null; p.cx = null; p.cy = null; p.vis = false;
+        if (cometCount === 0 && rnd() < 0.04) {
+          p.comet = true; p.tail = []; p.cometStroke = rnd() < 0.5; cometCount++;
+        }
         continue;
       }
-      const sp = sprites[p.si % ns]; if (!sp) continue;
       const near = 1 - p.z;
-      if (p.comet) { comet = p; p.cx = x; p.cy = y; continue; }
+      p.cx = x; p.cy = y;
+      p.band = p.z > 0.66 ? 0 : (p.z > 0.33 ? 1 : 2);
+      p.vis = p.sx != null;
+      if (p.comet) { comet = p; continue; }
+      if (p.stroked) continue;                       // drawn in the batched pass below
+      const sp = sprites[p.si % ns]; if (!sp) continue;
       const r = 2.5 + near * 15;
       ctx.globalAlpha = (0.22 + near * 0.58) * w;
       ctx.drawImage(sp, x - r, y - r, r * 2, r * 2);
     }
 
+    // The stroked quarter, batched to three calls (one per depth band). Stroke costs ~2-3ms a
+    // CALL on this panel regardless of how many segments it carries, so the count of calls is
+    // what matters, not the count of stars.
+    const sc = lift(pal.acc[0] || [210, 220, 245], 0.45);
+    const scStr = `${sc[0] | 0},${sc[1] | 0},${sc[2] | 0}`;
+    for (let band = 0; band < 3; band++) {
+      let any = false;
+      ctx.beginPath();
+      for (const p of pool) {
+        if (!p.stroked || !p.vis || p.comet || p.band !== band) continue;
+        ctx.moveTo(p.sx, p.sy); ctx.lineTo(p.cx, p.cy); any = true;
+      }
+      if (!any) continue;
+      ctx.strokeStyle = `rgba(${scStr},${(SB_A[band] * w).toFixed(3)})`;
+      ctx.lineWidth = SB_W[band];
+      ctx.stroke();
+    }
+
     if (comet) {
-      const p = comet, sp = sprites[p.si % ns], near = 1 - p.z;
+      const p = comet, near = 1 - p.z;
       p.tail.unshift({ x: p.cx, y: p.cy });
-      if (p.tail.length > 14) p.tail.pop();
-      if (sp) for (let j = p.tail.length - 1; j >= 0; j--) {
-        const f = 1 - j / p.tail.length;
-        const r = (5 + near * 26) * f;
-        ctx.globalAlpha = 0.65 * f * near * w;
-        ctx.drawImage(sp, p.tail[j].x - r, p.tail[j].y - r, r * 2, r * 2);
+      if (p.tail.length > 16) p.tail.pop();
+      const n = p.tail.length;
+      const c = lift(pal.acc[p.si % Math.max(1, pal.acc.length)] || [225, 238, 255], 0.6);
+      if (p.cometStroke && n > 1) {
+        const rgbStr = `${c[0] | 0},${c[1] | 0},${c[2] | 0}`;
+        const L = [[n, 2, 0.24], [Math.max(2, (n * 0.55) | 0), 4.5, 0.38], [Math.max(2, (n * 0.25) | 0), 7.5, 0.58]];
+        for (let li = 0; li < 3; li++) {
+          ctx.strokeStyle = `rgba(${rgbStr},${(L[li][2] * near * w).toFixed(3)})`;
+          ctx.lineWidth = L[li][1];
+          ctx.beginPath();
+          ctx.moveTo(p.tail[0].x, p.tail[0].y);
+          for (let j = 1; j < L[li][0]; j++) ctx.lineTo(p.tail[j].x, p.tail[j].y);
+          ctx.stroke();
+        }
+      } else {
+        const sp = sprites[p.si % ns];
+        if (sp) for (let j = n - 1; j >= 0; j--) {
+          const f = 1 - j / n;
+          const r = (5 + near * 26) * f;
+          ctx.globalAlpha = 0.65 * f * near * w;
+          ctx.drawImage(sp, p.tail[j].x - r, p.tail[j].y - r, r * 2, r * 2);
+        }
       }
     }
+
+    for (const p of pool) { p.sx = p.cx; p.sy = p.cy; }
     ctx.globalAlpha = 1;
   }
 
@@ -323,8 +385,7 @@
 
       if (p.esc === 0) {
         p.ba += p.bs * dt * mv * 0.35;
-        // one at a time, and rarely — an escape should read as an event, not a burst
-        if (escaping === 0 && rnd() < dt * mv * 0.004) { p.esc = 1; p.escArc = 0; escaping++; }
+        if (escaping < 2 && rnd() < dt * mv * 0.011) { p.esc = 1; escaping++; }
       }
 
       if (p.esc === 0) {
@@ -340,30 +401,31 @@
         continue;
       }
 
-      // Escaping: a SINGLE ring, no longer mirrored into the arms — the symmetry breaking is
-      // what makes it read as one ring leaving rather than an eight-fold burst.
-      // Distance from centre to the screen edge along this bearing (y is squashed 0.72):
+      // Escaping: a SINGLE ring, no longer mirrored into the arms — breaking the symmetry is
+      // what makes it read as one ring leaving rather than an eight-fold burst. It simply
+      // keeps drifting outward and off the screen; no hugging or sliding along the edge.
       const m = 46;
       const ca = Math.abs(Math.cos(p.ba)), sa = Math.abs(Math.sin(p.ba));
       const edgeR = Math.min(ca > 1e-3 ? (W / 2 + m) / ca : 1e6,
                              sa > 1e-3 ? (H / 2 + m) / (0.72 * sa) : 1e6);
-      if (p.esc === 1) {
-        p.br += 52 * dt * mv;                     // a slow drift out, not a launch
-        p.ba += p.bs * dt * mv * 0.18;
-        if (p.br >= edgeR) { p.esc = 2; p.escArc = 0; }
-      } else {
-        p.br = edgeR;                             // hug the rim and slide along it, half off-screen
-        const dir = p.bs < 0 ? -1 : 1;
-        p.ba += 0.30 * dt * mv * dir;
-        p.escArc += 0.30 * dt * mv;
-        if (p.escArc > 1.9) { p.esc = 0; p.br = p.br0; escaping--; }
+      p.br += 52 * dt * mv;
+      p.ba += p.bs * dt * mv * 0.18;
+      // On reaching the screen edge it starts fading out over a random 5-10s. It keeps
+      // drifting meanwhile, but by then the ring is large enough that a good part of it is
+      // still on screen, so the fade actually reads.
+      if (p.esc === 1 && p.br >= edgeR) { p.esc = 2; p.escFadeT = 0; p.escFadeDur = 5 + rnd() * 5; }
+      let escAlpha = 1;
+      if (p.esc === 2) {
+        p.escFadeT += dt * mv;
+        escAlpha = Math.max(0, 1 - p.escFadeT / p.escFadeDur);
+        if (p.escFadeT >= p.escFadeDur) { p.esc = 0; p.br = p.br0; escaping--; continue; }
       }
-      const grow = 1 + Math.max(0, p.br - p.br0) / 250;    // swells as it nears the edge
-      const sz = (14 + p.sz * 1.15) * grow;
-      const fade = p.esc === 2 ? Math.max(0, 1 - p.escArc / 1.9) : 1;
-      ctx.globalAlpha = 0.26 * fade * w;
+      // swell as it nears the edge; escK spreads this from barely-any to very large
+      const grow = 1 + Math.max(0, p.br - p.br0) / 250 * p.escK;
+      const sz = Math.min(760, (14 + p.sz * 1.15) * grow);   // clamp: huge sprites are pure fill cost
       const x = W / 2 + Math.cos(p.ba) * p.br;
       const y = H / 2 + Math.sin(p.ba) * p.br * 0.72;
+      ctx.globalAlpha = 0.26 * escAlpha * w;
       ctx.drawImage(sp, x - sz / 2, y - sz / 2, sz, sz);
     }
     ctx.globalAlpha = 1;
