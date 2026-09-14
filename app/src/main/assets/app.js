@@ -86,20 +86,13 @@
         const row = el('div', 'item');
         const img = el('img'); img.src = p.images?.[0]?.url || ''; row.append(img);
         const count = p.items?.total ?? p.tracks?.total;
-        const meta = [count != null ? `${count} tracks` : null, p.owner?.display_name].filter(Boolean).join(' · ');
+        const meta = [count != null ? `${count} track${count === 1 ? '' : 's'}` : null, p.owner?.display_name].filter(Boolean).join(' · ');
         row.append(el('div', '', `<div class="t">${esc(p.name)}</div><div class="s">${esc(meta)}</div>`));
-        row.onactivate = () => go({ name: 'playlist', id: p.id, title: p.name, uri: p.uri });
+        row.onactivate = () => { play({ context_uri: p.uri }); status('Playing ' + p.name); };
         list.append(row);
       }
       if (!items.length) list.append(el('div', 'empty', 'No playlists'));
       setMain('Playlists', list);
-    },
-    async playlist({ id, title, uri }) {
-      const list = el('div', 'list');
-      // Feb-2026 API: /tracks is gone for new apps; /items returns items[].item and caps limit at 50.
-      const r = await api(`/playlists/${id}/items?limit=50&fields=items(item(name,uri,artists(name)))`);
-      r.items.map(x => x.item).filter(t => t && t.uri).forEach((t, i) => list.append(trackRow(t, i, { context: uri })));
-      setMain(title, list); markPlaying();
     },
     async liked() {
       const list = el('div', 'list');
@@ -117,11 +110,20 @@
       input.addEventListener('keydown', async e => {
         if (e.key === 'Enter' && input.value.trim()) {
           e.preventDefault(); input.blur();
-          results.innerHTML = '';
-          const r = await api(`/search?type=track&limit=20&q=${encodeURIComponent(input.value.trim())}`);
-          r.tracks.items.forEach((t, i) => results.append(trackRow(t, i, { uris: r.tracks.items.map(x => x.uri).slice(i) })));
-          if (!r.tracks.items.length) results.append(el('div', 'empty', 'No results'));
-          focus.enter('main', 1);
+          results.innerHTML = '<div class="empty">Searching…</div>';
+          try {
+            // Dev-mode caps search at limit=10 (20+ -> 400 Invalid limit).
+            const r = await api(`/search?type=track&limit=10&q=${encodeURIComponent(input.value.trim())}`);
+            const tracks = (r.tracks?.items || []).filter(t => t && t.uri);
+            results.innerHTML = '';
+            tracks.forEach((t, i) => results.append(trackRow(t, i, { uris: tracks.map(x => x.uri).slice(i) })));
+            if (!tracks.length) results.append(el('div', 'empty', 'No results'));
+            focus.enter('main', 1);
+          } catch (err) {
+            results.innerHTML = '';
+            results.append(el('div', 'empty', 'Search failed: ' + err.message));
+            status(err.message);
+          }
         }
         if (e.key === 'Escape') input.blur();
       });
