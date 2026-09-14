@@ -88,7 +88,7 @@
     p.si = (rnd() * Math.max(1, sprites.length)) | 0;
     p.life = 3 + rnd() * 7;
     p.age = fresh ? rnd() * p.life : 0;
-    p.r = 150 + rnd() * 430;                 // orbit radius
+    p.r = 120 + rnd() * 900;                 // orbit radius: far past the viewport, so rings overflow
     p.a = rnd() * Math.PI * 2;               // orbit angle
     p.dir = rnd() < 0.5 ? -1 : 1;
   }
@@ -119,7 +119,7 @@
       if (mode === 1) {                                 // Orbit: elliptical rings round the art
         p.a += p.dir * (0.34 / (0.45 + p.r / 300)) * dt * moving;
         p.x = W / 2 + Math.cos(p.a) * p.r;
-        p.y = ART_CY + Math.sin(p.a) * p.r * 0.52;
+        p.y = H / 2 + Math.sin(p.a) * p.r * 0.62;
         p.age += dt * moving;
         if (p.age > p.life) spawn(p, false);
       } else {                                          // Drift: flow field
@@ -187,7 +187,7 @@
     if (!tPrev) tPrev = ts;
     let dt = (ts - tPrev) / 1000; tPrev = ts;
     if (dt > 0.1) dt = 0.1;
-    const moving = st.paused ? 0.22 : 1;          // paused: keep drifting slowly, never freeze
+    const moving = (st.paused ? 0.22 : 1) * (st.rate || 1);   // rate: tempo-scaled, see app.js
     tNow += dt * moving;
 
     const id = st.uri || '';

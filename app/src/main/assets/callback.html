@@ -5,7 +5,9 @@
 <script src="config.js"></script><script src="auth.js"></script>
 <script>
 (async () => {
-  const q = new URLSearchParams(location.search);
+  // params arrive in the hash when the native layer hands us the redirect (see MainActivity)
+  const raw = location.search.length > 1 ? location.search : location.hash.replace(/^#/, '');
+  const q = new URLSearchParams(raw);
   const msg = document.getElementById('msg');
   try {
     if (q.get('error')) throw new Error(q.get('error'));

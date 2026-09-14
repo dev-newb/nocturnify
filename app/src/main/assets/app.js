@@ -8,6 +8,10 @@
   let userId = null;      // signed-in user's id, for owned-vs-followed playlist logic
   let ctxName = '';       // what's playing (playlist / Liked Songs / search), shown in the visualiser
   let idleTimer = null;
+  let logoutArmed = false;
+  let tempoFor = '';
+  let rate = 1;           // tempo-derived motion rate for the visualiser (1 = unknown/default)
+  const bpmCache = {};    // trackId -> bpm (0 = looked up, none available)
 
   // ---------- Web API ----------
   async function api(path, opts = {}, retry = true) {
@@ -35,7 +39,10 @@
       catch (e) { status('transfer: ' + e.message); }
     });
     player.addListener('not_ready', () => { deviceId = null; status('Device offline'); });
-    player.addListener('player_state_changed', s => { lastState = s; lastStateAt = Date.now(); renderNow(); markPlaying(); pushNative(); });
+    player.addListener('player_state_changed', s => { lastState = s; lastStateAt = Date.now(); renderNow(); markPlaying(); pushNative();
+      const tid = s?.track_window?.current_track?.id;
+      if (tid && tid !== tempoFor) { tempoFor = tid; lookupTempo(tid); }
+    });
     for (const ev of ['initialization_error', 'authentication_error', 'account_error', 'playback_error'])
       player.addListener(ev, ({ message }) => status(`${ev}: ${message}`));
     player.connect().then(ok => { if (!ok) status('SDK failed to connect'); });
@@ -71,11 +78,38 @@
     const pos = s.paused ? s.position : Math.min(s.duration, s.position + (Date.now() - lastStateAt));
     $('#now-fill').style.width = (100 * pos / s.duration).toFixed(2) + '%';
   }, 500);
+  // Tempo -> motion RATE only. We have no beat phase (see research: /audio-analysis is 403),
+  // so nothing is allowed to "hit" — a wrong rate just looks slightly fast or slow, whereas a
+  // wrong phase visibly misses. Deezer covers ~60% of tracks; the rest stay at 1.
+  window.tvBpm = (id, bpm) => {
+    bpmCache[id] = bpm || 0;
+    try { localStorage['bpm_' + id] = String(bpm || 0); } catch (e) {}
+    if (lastState?.track_window?.current_track?.id === id) applyRate(bpm);
+  };
+  function applyRate(bpm) {
+    rate = bpm > 0 ? Math.max(0.6, Math.min(1.6, bpm / 100)) : 1;
+  }
+  async function lookupTempo(id) {
+    if (!id) { rate = 1; return; }
+    if (id in bpmCache) { applyRate(bpmCache[id]); return; }
+    let cached = null;
+    try { cached = localStorage['bpm_' + id]; } catch (e) {}
+    if (cached != null) { bpmCache[id] = +cached; applyRate(+cached); return; }
+    rate = 1;
+    try {
+      const t = await api('/tracks/' + id);                       // Spotify sends ACAO:*
+      const isrc = t?.external_ids?.isrc;
+      if (!isrc) { bpmCache[id] = 0; return; }
+      window.AndroidBridge?.postMessage(JSON.stringify({ type: 'bpm', id, isrc }));
+    } catch (e) { bpmCache[id] = 0; }
+  }
+
   // Mirror current play state to the native MediaSession + foreground service (background audio).
   function pushNative() {
     try {
       const t = lastState?.track_window?.current_track;
       window.AndroidBridge?.postMessage(JSON.stringify({
+        type: 'state',
         playing: lastState ? !lastState.paused : false,
         title: t?.name || '',
         artist: (t?.artists || []).map(a => a.name).join(', '),
@@ -88,6 +122,7 @@
     const s = lastState; if (!s) return {};
     const t = s.track_window?.current_track;
     return {
+      rate,
       uri: t?.uri || '', title: t?.name || '',
       artist: (t?.artists || []).map(a => a.name).join(', '),
       album: t?.album?.name || '',
@@ -192,7 +227,16 @@
       wrap.append(input, results);
       setMain('Search', wrap);
     },
-    logout() { AUTH.logout(); location.reload(); },
+    logout() {
+      const item = document.querySelector('[data-nav="logout"]');
+      if (logoutArmed) { AUTH.logout(); location.reload(); return; }
+      logoutArmed = true;
+      if (item) item.textContent = 'Press OK again to sign out';
+      setTimeout(() => {
+        logoutArmed = false;
+        if (item) item.textContent = 'Sign out';
+      }, 5000);
+    },
   };
 
   async function go(v) {
