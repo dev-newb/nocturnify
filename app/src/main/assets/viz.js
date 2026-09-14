@@ -155,7 +155,8 @@
       p.rx = -W * 0.25 + rnd() * W * 1.5; p.ry = rnd() * H; p.rs = 240 + rnd() * 520;
       p.rl = 12 + rnd() * 70; p.rw = 1.6 + rnd() * 4.4; p.rd = (rnd() - 0.5) * 18;
       // Bloom: orbiting seed point mirrored around the centre
-      p.br = 40 + rnd() * 300; p.ba = rnd() * Math.PI * 2; p.bs = (0.15 + rnd() * 0.5) * (rnd() < 0.5 ? -1 : 1);
+      p.br = 47 + rnd() * 354; p.ba = rnd() * Math.PI * 2; p.bs = (0.15 + rnd() * 0.5) * (rnd() < 0.5 ? -1 : 1);
+      p.escV = 34 + rnd() * 46;   // escape speed: kind of slow, to a bit faster
       p.br0 = p.br; p.esc = 0;
       p.escK = 0.25 + rnd() * rnd() * 15.75;   // escape swell: mostly slight, occasionally huge
       p.stroked = rnd() < 0.25;                // a quarter of stars draw as stroked segments
@@ -385,17 +386,26 @@
 
       if (p.esc === 0) {
         p.ba += p.bs * dt * mv * 0.35;
-        if (escaping < 2 && rnd() < dt * mv * 0.011) { p.esc = 1; escaping++; }
+        if (escaping < 2 && rnd() < dt * mv * 0.0127) { p.esc = 1; escaping++; }   // ~15% more
       }
 
       if (p.esc === 0) {
         const rr = p.br * (0.85 + Math.sin(tNow * 0.5 + i) * 0.15);
         const sz = (14 + p.sz * 1.15) * (0.75 + Math.sin(tNow * 0.7 + i * 1.9) * 0.25);
         ctx.globalAlpha = (0.14 + 0.12 * (1 - i / N)) * w;
+        // Instability rises sharply toward the centre. Jitter is per-ARM, not per-point, so
+        // the inner rings fray out of symmetry instead of wobbling in lockstep.
+        const centre = Math.max(0, 1 - (p.br0 - 47) / 354);
+        const jAmp = centre * centre * 16;
         for (let kk = 0; kk < ARMS; kk++) {
           const a2 = p.ba + (kk / ARMS) * TAU;
-          const x = W / 2 + Math.cos(a2) * rr;
-          const y = H / 2 + Math.sin(a2) * rr * 0.72;
+          let x = W / 2 + Math.cos(a2) * rr;
+          let y = H / 2 + Math.sin(a2) * rr * 0.72;
+          if (jAmp > 0.15) {
+            const ph = i * 2.3 + kk * 1.7;
+            x += Math.sin(tNow * 5.5 + ph) * jAmp + Math.sin(tNow * 11.3 + ph * 1.9) * jAmp * 0.5;
+            y += Math.cos(tNow * 6.1 + ph) * jAmp + Math.cos(tNow * 12.7 + ph * 2.3) * jAmp * 0.5;
+          }
           ctx.drawImage(sp, x - sz / 2, y - sz / 2, sz, sz);
         }
         continue;
@@ -408,12 +418,12 @@
       const ca = Math.abs(Math.cos(p.ba)), sa = Math.abs(Math.sin(p.ba));
       const edgeR = Math.min(ca > 1e-3 ? (W / 2 + m) / ca : 1e6,
                              sa > 1e-3 ? (H / 2 + m) / (0.72 * sa) : 1e6);
-      p.br += 52 * dt * mv;
+      p.br += p.escV * dt * mv;
       p.ba += p.bs * dt * mv * 0.18;
       // On reaching the screen edge it starts fading out over a random 5-10s. It keeps
       // drifting meanwhile, but by then the ring is large enough that a good part of it is
       // still on screen, so the fade actually reads.
-      if (p.esc === 1 && p.br >= edgeR) { p.esc = 2; p.escFadeT = 0; p.escFadeDur = 5 + rnd() * 5; }
+      if (p.esc === 1 && p.br >= edgeR) { p.esc = 2; p.escFadeT = 0; p.escFadeDur = 3 + rnd() * 3; }
       let escAlpha = 1;
       if (p.esc === 2) {
         p.escFadeT += dt * mv;
