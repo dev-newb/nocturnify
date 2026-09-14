@@ -166,13 +166,18 @@
     ctx.fillStyle = 'rgba(255,255,255,0.74)';
     ctx.font = '27px system-ui, sans-serif';
     ctx.fillText(st.artist || '', W / 2, y);
-    if (st.album) {
+    // Singles often name the album after the track, and playing an album sets the context to
+    // the album name — so both lines can echo something already on screen. Show each only once.
+    const norm = x => (x || '').trim().toLowerCase();
+    const showAlbum = st.album && norm(st.album) !== norm(st.title);
+    const showCtx = st.context && norm(st.context) !== norm(st.album) && norm(st.context) !== norm(st.title);
+    if (showAlbum) {
       y += 33;
       ctx.fillStyle = 'rgba(255,255,255,0.46)';
       ctx.font = '22px system-ui, sans-serif';
       ctx.fillText(st.album, W / 2, y);
     }
-    if (st.context) {
+    if (showCtx) {
       y += 30;
       const a = pal.acc[0] || [180, 200, 230];
       ctx.fillStyle = `rgba(${a[0] | 0},${a[1] | 0},${a[2] | 0},0.72)`;

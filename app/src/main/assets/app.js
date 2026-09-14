@@ -6,6 +6,7 @@
   const status = m => { $('#now-status').textContent = m; console.log('[status]', m); };
   let screen = 'login';   // 'login' | 'app' — decides how the remote OK key is routed
   let userId = null;      // signed-in user's id, for owned-vs-followed playlist logic
+  let lastSearch = null;   // {q, tracks, albums} — so returning to Search keeps results
   let ctxName = '';       // what's playing (playlist / Liked Songs / search), shown in the visualiser
   let idleTimer = null;
   let logoutArmed = false;
@@ -63,7 +64,11 @@
     const s = lastState; if (!s || !s.track_window?.current_track) return;
     const t = s.track_window.current_track;
     $('#now-title').textContent = t.name;
-    $('#now-artist').textContent = t.artists.map(a => a.name).join(', ') + '  ·  ' + t.album.name;
+    const names = (t.artists || []).map(a => a.name).join(', ');
+    const alb = t.album?.name || '';
+    // don't echo the album when it just repeats the track title (common for singles)
+    $('#now-artist').textContent = alb && alb.trim().toLowerCase() !== (t.name || '').trim().toLowerCase()
+      ? `${names}  ·  ${alb}` : names;
     $('#now-art').src = t.album.images?.[0]?.url || '';
     $('#now-state').textContent = s.paused ? '❚❚' : '▶';
   }
@@ -134,7 +139,26 @@
       setTimeout(() => VIZ.setSeekPreview(null), 700);
     }, 400);
   }
-  window.tvScrub = dir => seekBy(dir * 5000);
+  // Remote FF/RW: a single press skips a track, holding scrubs within it. Key repeat is the
+  // only signal that separates them — one lone event is a tap, a stream of them is a hold.
+  let ffDir = 0, ffCount = 0, ffTimer = null, ffT0 = 0;
+  const FF_TAP_MS = 500;
+  window.tvScrub = dir => {
+    const now = performance.now();
+    if (ffDir !== dir) { clearTimeout(ffTimer); ffDir = dir; ffCount = 0; ffT0 = now; }
+    ffCount++;
+    console.log('[ff]', dir, 'n=' + ffCount, 'dt=' + Math.round(now - ffT0));   // TEMP: tune FF_TAP_MS
+    if (ffCount === 1) {
+      ffTimer = setTimeout(() => {
+        if (ffCount === 1) { if (dir > 0) player?.nextTrack(); else player?.previousTrack(); }
+        ffDir = 0; ffCount = 0;
+      }, FF_TAP_MS);
+    } else {
+      clearTimeout(ffTimer);
+      seekBy(dir * 5000);
+      ffTimer = setTimeout(() => { ffDir = 0; ffCount = 0; }, 600);
+    }
+  };
   window.tvSeekTo = ms => { Promise.resolve(player?.seek(ms)).catch(() => {}); };
 
   function markPlaying() {
@@ -185,6 +209,34 @@
       if (!list.children.length) list.append(el('div', 'empty', 'No tracks'));
       setMain(title, list); markPlaying();
     },
+    async recent() {
+      ctxName = 'Recent Albums';
+      const list = el('div', 'list');
+      const r = await api('/me/player/recently-played?limit=50');
+      const seen = new Set(), albums = [];
+      for (const it of (r.items || [])) {                 // dedupe albums, most recent play first
+        const al = it?.track?.album;
+        if (al?.id && !seen.has(al.id)) { seen.add(al.id); albums.push(al); }
+      }
+      for (const al of albums) {
+        const row = el('div', 'item');
+        const img = el('img'); img.src = al.images?.[2]?.url || al.images?.[0]?.url || '';
+        const bits = [al.total_tracks ? `${al.total_tracks} track${al.total_tracks === 1 ? '' : 's'}` : null,
+                      (al.artists || []).map(x => x.name).join(', ')].filter(Boolean).join(' · ');
+        row.append(img, el('div', '', `<div class="t">${esc(al.name)}</div><div class="s">${esc(bits)}</div>`));
+        row.onactivate = () => { ctxName = al.name; go({ name: 'album', id: al.id, title: al.name, uri: al.uri }); };
+        list.append(row);
+      }
+      if (!albums.length) list.append(el('div', 'empty', 'Nothing played recently'));
+      setMain('Recent Albums', list); markPlaying();
+    },
+    async album({ id, title, uri }) {
+      const list = el('div', 'list');
+      const r = await api(`/albums/${id}/tracks?limit=50`);   // plain track objects, no .track wrapper
+      (r.items || []).filter(t => t && t.uri).forEach((t, i) => list.append(trackRow(t, i, { context: uri })));
+      if (!list.children.length) list.append(el('div', 'empty', 'No tracks'));
+      setMain(title, list); markPlaying();
+    },
     async liked() {
       ctxName = 'Liked Songs';
       const list = el('div', 'list');
@@ -195,33 +247,60 @@
       setMain('Liked Songs', list); markPlaying();
     },
     async search() {
+      ctxName = 'Search';
       const wrap = el('div');
-      const input = el('input'); input.placeholder = 'Search songs, albums, artists…'; input.className = 'item';
+      const input = el('input'); input.placeholder = 'Search songs and albums…'; input.className = 'item';
       const results = el('div', 'list');
-      input.onactivate = () => input.focus();                       // Enter on the field opens the TV keyboard
-      input.addEventListener('keydown', async e => {
-        if (e.key === 'Enter' && input.value.trim()) {
-          e.preventDefault(); input.blur();
-          ctxName = 'Search: ' + input.value.trim();
-          results.innerHTML = '<div class="empty">Searching…</div>';
-          try {
-            // Dev-mode caps search at limit=10 (20+ -> 400 Invalid limit).
-            const r = await api(`/search?type=track&limit=10&q=${encodeURIComponent(input.value.trim())}`);
-            const tracks = (r.tracks?.items || []).filter(t => t && t.uri);
-            results.innerHTML = '';
-            tracks.forEach((t, i) => results.append(trackRow(t, i, { uris: tracks.map(x => x.uri).slice(i) })));
-            if (!tracks.length) results.append(el('div', 'empty', 'No results'));
-            focus.enter('main', 1);
-          } catch (err) {
-            results.innerHTML = '';
-            results.append(el('div', 'empty', 'Search failed: ' + err.message));
-            status(err.message);
+      input.onactivate = () => input.focus();          // OK enters the field; IME opens
+      const render = () => {
+        results.innerHTML = '';
+        const { albums = [], tracks = [] } = lastSearch || {};
+        if (albums.length) {
+          results.append(el('div', 'sect', 'Albums'));
+          for (const al of albums) {
+            const row = el('div', 'item');
+            const img = el('img'); img.src = al.images?.[2]?.url || al.images?.[0]?.url || '';
+            row.append(img, el('div', '', `<div class="t">${esc(al.name)}</div><div class="s">${al.total_tracks} tracks · ${esc((al.artists || []).map(x => x.name).join(', '))}</div>`));
+            row.onactivate = () => { ctxName = al.name; go({ name: 'album', id: al.id, title: al.name, uri: al.uri }); };
+            results.append(row);
           }
         }
-        if (e.key === 'Escape') input.blur();
+        if (tracks.length) {
+          results.append(el('div', 'sect', 'Songs'));
+          tracks.forEach((t, i) => results.append(trackRow(t, i, { uris: tracks.map(x => x.uri).slice(i) })));
+        }
+        if (!albums.length && !tracks.length) results.append(el('div', 'empty', lastSearch ? 'No results' : 'Press OK to type a search'));
+        markPlaying();
+      };
+      const run = async () => {
+        const q = input.value.trim(); if (!q) return;
+        results.innerHTML = '<div class="empty">Searching…</div>';
+        try {
+          const r = await api(`/search?type=track,album&limit=10&q=${encodeURIComponent(q)}`);   // dev mode caps limit at 10
+          lastSearch = {
+            q,
+            tracks: (r.tracks?.items || []).filter(t => t && t.uri),
+            albums: (r.albums?.items || []).filter(a2 => a2 && a2.uri),
+          };
+          render();
+          focus.enter('main', 1);
+        } catch (err) {
+          results.innerHTML = '';
+          results.append(el('div', 'empty', 'Search failed: ' + err.message));
+          status(err.message);
+        }
+      };
+      input.addEventListener('keydown', async e => {
+        if (e.key === 'Enter') { e.preventDefault(); input.blur(); await run(); }
+        else if (e.key === 'Escape') { e.preventDefault(); input.blur(); }
+        // D-pad must be able to leave the field, otherwise results are unreachable
+        else if (e.key === 'ArrowDown') { e.preventDefault(); input.blur(); focus.enter('main', 1); }
+        else if (e.key === 'ArrowUp') { e.preventDefault(); input.blur(); focus.enter('main', 0); }
       });
+      if (lastSearch) input.value = lastSearch.q;
       wrap.append(input, results);
       setMain('Search', wrap);
+      render();                                        // restore previous results immediately
     },
     logout() {
       const item = document.querySelector('[data-nav="logout"]');
@@ -251,7 +330,12 @@
     apply() {
       for (const z of ['side', 'main']) this.items(z).forEach((it, i) => it.classList.toggle('focused', z === this.zone && i === this.idx[z]));
       const cur = this.current();
-      if (cur) { cur.tabIndex = -1; cur.focus({ preventScroll: true }); cur.scrollIntoView({ block: 'nearest' }); }
+      if (cur) {
+        // never pull DOM focus into the search field — that traps the D-pad. OK enters it.
+        if (cur.tagName !== 'INPUT') { cur.tabIndex = -1; cur.focus({ preventScroll: true }); }
+        else document.activeElement?.blur?.();
+        cur.scrollIntoView({ block: 'nearest' });
+      }
     },
     current() { return this.items(this.zone)[this.idx[this.zone]]; },
   };
@@ -259,9 +343,9 @@
   // Activate whatever actually holds DOM focus — works for sidebar, list rows, and the login button alike.
   function activateFocused() {
     const a = document.activeElement;
-    const t = (a && (a.dataset.nav || a.onactivate)) ? a : focus.current();
+    const t = focus.current() || ((a && (a.dataset?.nav || a.onactivate)) ? a : null);
     if (!t) return;
-    if (t.dataset.nav) go({ name: t.dataset.nav }); else t.onactivate?.();
+    if (t.dataset?.nav) go({ name: t.dataset.nav }); else t.onactivate?.();
   }
 
   document.addEventListener('keydown', e => {
@@ -309,6 +393,7 @@
   // ---------- Boot ----------
   (function boot() {
     if (!AUTH.configured()) { $('#setup-uri').textContent = AUTH.redirectUri; $('#setup').hidden = false; return; }
+    if (AUTH.scopesStale()) AUTH.logout();   // a newly-added scope needs a freshly issued token
     if (!AUTH.signedIn()) {
       $('#login').hidden = false;
       screen = 'login';

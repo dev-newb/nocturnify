@@ -6,8 +6,12 @@
     'streaming', 'user-read-email', 'user-read-private',
     'user-read-playback-state', 'user-modify-playback-state',
     'user-library-read', 'playlist-read-private', 'playlist-read-collaborative',
+    'user-read-recently-played',
   ].join(' ');
-  const LS = { access: 'sp_access', refresh: 'sp_refresh', exp: 'sp_exp', verifier: 'sp_pkce_verifier' };
+  // Scopes are baked into an issued token, so adding one above means the stored refresh token
+  // is stale. Bump this and the app forces a single re-login instead of 403-ing at runtime.
+  const SCOPE_VERSION = '2';
+  const LS = { access: 'sp_access', refresh: 'sp_refresh', exp: 'sp_exp', verifier: 'sp_pkce_verifier', scopes: 'sp_scopes_v' };
 
   const b64url = buf => btoa(String.fromCharCode(...new Uint8Array(buf)))
     .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
@@ -27,6 +31,7 @@
     localStorage[LS.access] = j.access_token;
     if (j.refresh_token) localStorage[LS.refresh] = j.refresh_token;   // PKCE rotates refresh tokens
     localStorage[LS.exp] = String(Date.now() + j.expires_in * 1000);
+    localStorage[LS.scopes] = SCOPE_VERSION;
     return j.access_token;
   }
 
@@ -34,6 +39,7 @@
     redirectUri: `${location.origin}/assets/callback.html`,
     configured: () => !!CONFIG.clientId && !CONFIG.clientId.startsWith('PASTE'),
     signedIn: () => !!localStorage[LS.refresh],
+    scopesStale: () => !!localStorage[LS.refresh] && localStorage[LS.scopes] !== SCOPE_VERSION,
 
     async login() {
       const verifier = randomString(64);
