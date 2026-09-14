@@ -92,8 +92,9 @@
     },
     async playlist({ id, title, uri }) {
       const list = el('div', 'list');
-      const r = await api(`/playlists/${id}/tracks?limit=100&fields=items(track(name,uri,artists(name)))`);
-      r.items.map(x => x.track).filter(Boolean).forEach((t, i) => list.append(trackRow(t, i, { context: uri })));
+      // Feb-2026 API: /tracks is gone for new apps; /items returns items[].item and caps limit at 50.
+      const r = await api(`/playlists/${id}/items?limit=50&fields=items(item(name,uri,artists(name)))`);
+      r.items.map(x => x.item).filter(t => t && t.uri).forEach((t, i) => list.append(trackRow(t, i, { context: uri })));
       setMain(title, list); markPlaying();
     },
     async liked() {
@@ -113,7 +114,7 @@
         if (e.key === 'Enter' && input.value.trim()) {
           e.preventDefault(); input.blur();
           results.innerHTML = '';
-          const r = await api(`/search?type=track&limit=25&q=${encodeURIComponent(input.value.trim())}`);
+          const r = await api(`/search?type=track&limit=20&q=${encodeURIComponent(input.value.trim())}`);
           r.tracks.items.forEach((t, i) => results.append(trackRow(t, i, { uris: r.tracks.items.map(x => x.uri).slice(i) })));
           if (!r.tracks.items.length) results.append(el('div', 'empty', 'No results'));
           focus.enter('main', 1);
