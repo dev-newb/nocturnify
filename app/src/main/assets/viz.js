@@ -8,11 +8,11 @@
 // quantised from the cover art's actual pixels.
 (function () {
   const W = 1280, H = 720;
-  const NPART = 240;
+  const NPART = 210;
   const FPS = 60;             // load reduction didn't correlate with the audio gaps — restored
-  const MODES = ['Drift', 'Orbit', 'Aurora', 'Nebula', 'Starfield', 'Ribbons'];
+  const MODES = ['Drift', 'Orbit', 'Aurora', 'Nebula', 'Starfield', 'Ribbons', 'Lattice', 'Bloom', 'Rain'];
   const AUTO = MODES.length;            // hidden slot: sits between the last and first
-  const TRAIL = [0.135, 0.135, 0.09, 0.055, 0.30, 0.10];   // per-mode trail persistence
+  const TRAIL = [0.135, 0.135, 0.09, 0.055, 0.13, 0.10, 0.22, 0.10, 0.20];   // per-mode trail persistence
   const HOLD = 22, FADE = 5;            // Auto: seconds held, seconds cross-fading
   const ART_CY = H * 0.355, ART_SZ = 268;
 
@@ -124,6 +124,10 @@
       p.dx = (rnd() - 0.5) * 2; p.dy = (rnd() - 0.5) * 2;
       p.z = 0.05 + rnd() * 0.95;
       p.sx = null; p.sy = null; p.comet = false; p.tail = null;
+      // Rain: column, fall speed, streak length
+      p.rx = rnd() * W; p.ry = rnd() * H; p.rs = 240 + rnd() * 520; p.rl = 16 + rnd() * 48;
+      // Bloom: orbiting seed point mirrored around the centre
+      p.br = 40 + rnd() * 300; p.ba = rnd() * Math.PI * 2; p.bs = (0.15 + rnd() * 0.5) * (rnd() < 0.5 ? -1 : 1);
     }
   }
 
@@ -200,18 +204,14 @@
     ctx.globalAlpha = 1;
   }
 
-  // Starfield — perspective streaks rushing outward from centre. Occasionally one star is
-  // promoted to a comet: same trajectory and perspective as its neighbours, just brighter with
-  // a long tapered tail.
-  //
-  // Streaks are batched into one path per (colour, depth band). Stroking each star separately
-  // was 240 draw calls a frame and measured 98.9% janky; this is ~12 and the look is the same,
-  // since alpha/width only quantise into three depth bands.
-  const SB_A = [0.34, 0.60, 0.86];      // per-band alpha
-  const SB_W = [1.2, 2.4, 4.2];         // per-band line width
+  // Starfield — benchmarking showed stroke() costs ~2-3ms a call on this panel even when
+  // batched (74% janky frames), while drawImage of 210 sprites costs ~8ms total. So the stars
+  // are drawn as depth-scaled dots and the streaks come from the trail persistence instead —
+  // the smear IS the motion blur. One star is occasionally promoted to a comet: same radial
+  // path, just larger and brighter with a tail of fading sprites.
   function mStars(pool, w, dt, mv) {
     ctx.globalCompositeOperation = 'lighter';
-    ctx.lineCap = 'round';
+    const ns = Math.max(1, sprites.length);
     let cometCount = 0, comet = null;
     for (const p of pool) if (p.comet) cometCount++;
 
@@ -221,72 +221,36 @@
       const y = H / 2 + (p.dy / p.z) * 210;
       if (p.z < 0.06 || x < -220 || x > W + 220 || y < -220 || y > H + 220) {
         if (p.comet) { p.comet = false; cometCount--; }
-        p.dx = (rnd() - 0.5) * 2; p.dy = (rnd() - 0.5) * 2; p.z = 1;
-        // cx/cy must be cleared too: the final pass copies them into sx/sy for every particle,
-        // so a stale pre-respawn position would be drawn as a stray segment next frame.
-        p.sx = null; p.sy = null; p.cx = null; p.cy = null; p.tail = null; p.vis = false;
+        p.dx = (rnd() - 0.5) * 2; p.dy = (rnd() - 0.5) * 2; p.z = 1; p.tail = null;
         if (cometCount === 0 && rnd() < 0.04) { p.comet = true; p.tail = []; cometCount++; }
         continue;
       }
-      p.band = p.z > 0.66 ? 0 : (p.z > 0.33 ? 1 : 2);
-      p.vis = p.sx != null && !p.comet;
-      p.cx = x; p.cy = y;
-      if (p.comet) comet = p;
-    }
-
-    const nc = Math.max(1, pal.acc.length);
-    for (let ci = 0; ci < nc; ci++) {
-      const c = lift(pal.acc[ci] || [200, 210, 240]);
-      const rgbStr = `${c[0] | 0},${c[1] | 0},${c[2] | 0}`;
-      for (let band = 0; band < 3; band++) {
-        let any = false;
-        ctx.beginPath();
-        for (const p of pool) {
-          if (!p.vis || p.band !== band || (p.si % nc) !== ci) continue;
-          ctx.moveTo(p.sx, p.sy); ctx.lineTo(p.cx, p.cy); any = true;
-        }
-        if (!any) continue;
-        ctx.strokeStyle = `rgba(${rgbStr},${(SB_A[band] * w).toFixed(3)})`;
-        ctx.lineWidth = SB_W[band];
-        ctx.stroke();
-      }
+      const sp = sprites[p.si % ns]; if (!sp) continue;
+      const near = 1 - p.z;
+      if (p.comet) { comet = p; p.cx = x; p.cy = y; continue; }
+      const r = 2.5 + near * 15;
+      ctx.globalAlpha = (0.22 + near * 0.58) * w;
+      ctx.drawImage(sp, x - r, y - r, r * 2, r * 2);
     }
 
     if (comet) {
-      const p = comet, c = lift(pal.acc[p.si % nc] || [220, 235, 255], 0.62);
+      const p = comet, sp = sprites[p.si % ns], near = 1 - p.z;
       p.tail.unshift({ x: p.cx, y: p.cy });
-      if (p.tail.length > 18) p.tail.pop();
-      const n = p.tail.length;
-      if (n > 1) {
-        const rgbStr = `${c[0] | 0},${c[1] | 0},${c[2] | 0}`;
-        const vis = (1 - p.z) * w;
-        const L = [[n, 2, 0.20], [Math.max(2, (n * 0.6) | 0), 4.5, 0.34], [Math.max(2, (n * 0.28) | 0), 7.5, 0.52]];
-        for (let li = 0; li < 3; li++) {
-          ctx.strokeStyle = `rgba(${rgbStr},${(L[li][2] * vis).toFixed(3)})`;
-          ctx.lineWidth = L[li][1];
-          ctx.beginPath();
-          ctx.moveTo(p.tail[0].x, p.tail[0].y);
-          for (let j = 1; j < L[li][0]; j++) ctx.lineTo(p.tail[j].x, p.tail[j].y);
-          ctx.stroke();
-        }
-      }
-      const sp = sprites[p.si % Math.max(1, sprites.length)];
-      if (sp) {
-        const r = 16 + (1 - p.z) * 30;
-        ctx.globalAlpha = 0.85 * (1 - p.z) * w;
-        ctx.drawImage(sp, p.cx - r, p.cy - r, r * 2, r * 2);
-        ctx.globalAlpha = 1;
+      if (p.tail.length > 14) p.tail.pop();
+      if (sp) for (let j = p.tail.length - 1; j >= 0; j--) {
+        const f = 1 - j / p.tail.length;
+        const r = (5 + near * 26) * f;
+        ctx.globalAlpha = 0.65 * f * near * w;
+        ctx.drawImage(sp, p.tail[j].x - r, p.tail[j].y - r, r * 2, r * 2);
       }
     }
-
-    for (const p of pool) { p.sx = p.cx; p.sy = p.cy; }
     ctx.globalAlpha = 1;
   }
 
   // Ribbons — long silk bands woven from summed sines.
   function mRibbons(pool, w) {
     ctx.globalCompositeOperation = 'lighter';
-    const bands = 6, step = 26;
+    const bands = 4, step = 30;
     for (let b = 0; b < bands; b++) {
       const c = pal.acc[b % pal.acc.length] || [180, 200, 235];
       const ph = b * 1.24, amp = H * (0.10 + (b % 3) * 0.045);
@@ -305,6 +269,69 @@
     ctx.globalAlpha = 1;
   }
 
+  // Lattice — a standing wave crossing a geometric grid; only crests are drawn, so most
+  // cells cost nothing and the field reads as a pulse travelling outward.
+  function mLattice(pool, w, dt, mv) {
+    ctx.globalCompositeOperation = 'lighter';
+    const cols = 22, rows = 13, dx = W / cols, dy = H / rows;
+    const ns = Math.max(1, sprites.length);
+    for (let gy = 0; gy < rows; gy++) {
+      const y = (gy + 0.5) * dy, ry = y - H / 2;
+      for (let gx = 0; gx < cols; gx++) {
+        const x = (gx + 0.5) * dx, rx = x - W / 2;
+        const d = Math.sqrt(rx * rx + ry * ry);
+        const f = Math.sin(d * 0.011 - tNow * 1.5);
+        if (f < 0.05) continue;                       // troughs cost nothing
+        const sp = sprites[(gx + gy) % ns]; if (!sp) continue;
+        const r = 6 + f * 30;
+        ctx.globalAlpha = 0.50 * f * w;
+        ctx.drawImage(sp, x - r, y - r, r * 2, r * 2);
+      }
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  // Bloom — rotational symmetry: a handful of orbiting points mirrored into eight arms,
+  // which is what turns a few particles into a mandala.
+  function mBloom(pool, w, dt, mv) {
+    ctx.globalCompositeOperation = 'lighter';
+    const ARMS = 8, N = Math.min(pool.length, 26), TAU = Math.PI * 2;
+    for (let i = 0; i < N; i++) {
+      const p = pool[i];
+      p.ba += p.bs * dt * mv * 0.35;
+      const rr = p.br * (0.85 + Math.sin(tNow * 0.5 + i) * 0.15);
+      const sp = sprites[p.si % Math.max(1, sprites.length)]; if (!sp) continue;
+      const sz = p.sz * 0.75;
+      ctx.globalAlpha = 0.22 * w;
+      for (let kk = 0; kk < ARMS; kk++) {
+        const a = p.ba + (kk / ARMS) * TAU;
+        const x = W / 2 + Math.cos(a) * rr;
+        const y = H / 2 + Math.sin(a) * rr * 0.72;
+        ctx.drawImage(sp, x - sz / 2, y - sz / 2, sz, sz);
+      }
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  // Rain — directional fall with a slow lateral sway, drawn with the pre-rendered vertical
+  // gradient strips (the same sprites Aurora uses). Stroked, this mode benchmarked at 89%
+  // janky frames; as drawImage it costs the same as Drift.
+  function mRain(pool, w, dt, mv) {
+    if (!curtains.length) return;
+    ctx.globalCompositeOperation = 'lighter';
+    const nc = curtains.length;
+    for (const p of pool) {
+      p.ry += p.rs * dt * mv;
+      p.rx += Math.sin(tNow * 0.3 + p.ry * 0.004) * 14 * dt * mv;
+      if (p.ry - p.rl > H) { p.ry = -p.rl - rnd() * 240; p.rx = rnd() * W; }
+      const near = p.rs > 600 ? 1 : (p.rs > 420 ? 0.68 : 0.42);
+      const cw = 2 + near * 4.5;
+      ctx.globalAlpha = (0.16 + near * 0.34) * w;
+      ctx.drawImage(curtains[p.si % nc], p.rx - cw / 2, p.ry - p.rl, cw, p.rl);
+    }
+    ctx.globalAlpha = 1;
+  }
+
   function renderMode(id, pool, w, dt, mv, k) {
     switch (id) {
       case 0: return mDrift(pool, w, dt, mv, k);
@@ -313,6 +340,9 @@
       case 3: return mNebula(pool, w, dt, mv);
       case 4: return mStars(pool, w, dt, mv);
       case 5: return mRibbons(pool, w);
+      case 6: return mLattice(pool, w, dt, mv);
+      case 7: return mBloom(pool, w, dt, mv);
+      case 8: return mRain(pool, w, dt, mv);
     }
   }
 
@@ -490,6 +520,7 @@
       modeUntil = tNow + 2;
       if (mode === AUTO) { autoT = 0; autoIdx = 0; autoNextReady = -1; }
       initFor(mode === AUTO ? autoIdx : mode, poolA);
+      console.log('[viz] mode:', this.modeName());
       return this.modeName();
     },
     modeName: () => (mode === AUTO ? 'Auto' : MODES[mode]),
