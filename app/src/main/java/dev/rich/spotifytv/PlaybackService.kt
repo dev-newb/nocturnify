@@ -42,6 +42,10 @@ class PlaybackService : android.app.Service() {
     }
 
     private fun applyState(playing: Boolean, title: String, artist: String) {
+        // Rebuilding the notification and re-writing session state for identical data is pure
+        // churn on the media stack; skip it.
+        if (started && playing == lastPlaying && title == lastTitle && artist == lastArtist) return
+        started = true
         lastPlaying = playing; lastTitle = title; lastArtist = artist
         val s = session ?: return
         s.isActive = true
@@ -103,6 +107,7 @@ class PlaybackService : android.app.Service() {
         @Volatile var session: MediaSessionCompat? = null
         // Set by MainActivity: runs a JS snippet in the WebView (media-button -> web player).
         @Volatile var controlSink: ((String) -> Unit)? = null
+        private var started = false
         private var lastPlaying = false
         private var lastTitle = ""
         private var lastArtist = ""

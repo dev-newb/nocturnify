@@ -81,14 +81,21 @@
     $('#now-fill').style.width = (100 * pos / s.duration).toFixed(2) + '%';
   }, 500);
   // Mirror current play state to the native MediaSession + foreground service (background audio).
+  let lastPush = '';
   function pushNative() {
     try {
       const t = lastState?.track_window?.current_track;
-      window.AndroidBridge?.postMessage(JSON.stringify({
+      const payload = JSON.stringify({
         playing: lastState ? !lastState.paused : false,
         title: t?.name || '',
         artist: (t?.artists || []).map(a => a.name).join(', '),
-      }));
+      });
+      // player_state_changed fires constantly (position ticks included). Crossing the bridge
+      // each time rebuilt the notification and spammed the system media wrapper — which said
+      // as much: "tried to update with no new data".
+      if (payload === lastPush) return;
+      lastPush = payload;
+      window.AndroidBridge?.postMessage(payload);
     } catch (e) { /* bridge absent (e.g. older WebView) — background audio just won't engage */ }
   }
 
