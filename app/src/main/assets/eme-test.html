@@ -1,0 +1,49 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>EME gate</title>
+<style>
+  body{background:#121212;color:#eee;font:24px/1.6 system-ui,sans-serif;padding:48px;margin:0}
+  h1{font-size:34px;margin:0 0 20px} b{color:#999;font-weight:500;display:inline-block;min-width:400px}
+  .ok{color:#1db954}.bad{color:#f55}.res{margin-top:24px;font-size:30px}
+  pre{color:#777;font-size:15px;white-space:pre-wrap;margin-top:32px}
+</style></head><body>
+<h1>Widevine / EME gate</h1>
+<div id="out"></div>
+<pre id="ua"></pre>
+<script>
+const out = document.getElementById('out');
+const line = (k, v, ok, cls='') => { const d = document.createElement('div'); d.className = cls;
+  d.innerHTML = `<b>${k}</b><span class="${ok?'ok':'bad'}">${v}</span>`; out.appendChild(d); };
+document.getElementById('ua').textContent = navigator.userAgent;
+
+line('isSecureContext', window.isSecureContext, window.isSecureContext);
+line('origin', location.origin, location.protocol === 'https:');
+line('MediaSource (MSE)', !!window.MediaSource, !!window.MediaSource);
+line('crypto.subtle', !!(crypto && crypto.subtle), !!(crypto && crypto.subtle));
+line('requestMediaKeySystemAccess', typeof navigator.requestMediaKeySystemAccess,
+     typeof navigator.requestMediaKeySystemAccess === 'function');
+
+(async () => {
+  try {
+    const cfg = [{ initDataTypes: ['cenc'],
+      audioCapabilities: [{ contentType: 'audio/mp4; codecs="mp4a.40.2"' }],
+      videoCapabilities: [{ contentType: 'video/mp4; codecs="avc1.42E01E"' }] }];
+    const access = await navigator.requestMediaKeySystemAccess('com.widevine.alpha', cfg);
+    line('Widevine keySystem', access.keySystem, true);
+    const keys = await access.createMediaKeys();
+    line('createMediaKeys', 'OK', true);
+    keys.createSession('temporary');
+    line('createSession', 'OK', true);
+    // Which robustness tiers does this WebView expose? (L1 = HW_SECURE_*, L3 = SW_SECURE_*)
+    for (const r of ['HW_SECURE_ALL', 'HW_SECURE_DECODE', 'HW_SECURE_CRYPTO', 'SW_SECURE_DECODE', 'SW_SECURE_CRYPTO']) {
+      try {
+        await navigator.requestMediaKeySystemAccess('com.widevine.alpha',
+          [{ initDataTypes: ['cenc'], audioCapabilities: [{ contentType: 'audio/mp4; codecs="mp4a.40.2"', robustness: r }] }]);
+        line('robustness ' + r, 'supported', true);
+      } catch (e) { line('robustness ' + r, 'no', false); }
+    }
+    line('RESULT', 'WIDEVINE OK — gate passed', true, 'res');
+  } catch (e) {
+    line('RESULT', 'FAILED: ' + (e && e.message || e), false, 'res');
+  }
+})();
+</script></body></html>

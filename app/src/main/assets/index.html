@@ -1,0 +1,44 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Spotify TV</title>
+<link rel="stylesheet" href="style.css">
+</head><body>
+
+<div id="setup" hidden>
+  <h1>One-time setup</h1>
+  <p>Create an app at <b>developer.spotify.com/dashboard</b>, then:</p>
+  <ol>
+    <li>Add this Redirect URI exactly: <code id="setup-uri"></code></li>
+    <li>Paste the Client ID into <code>assets/config.js</code> and rebuild.</li>
+  </ol>
+</div>
+
+<div id="login" hidden>
+  <div class="logo"></div>
+  <h1>Spotify TV</h1>
+  <button id="login-btn" class="item focused">Sign in to Spotify</button>
+  <p class="hint">Use your email and password on the next screen.<br>“Continue with Google” won’t work inside an app.</p>
+</div>
+
+<div id="app" hidden>
+  <nav id="side">
+    <div class="item" data-nav="home">Playlists</div>
+    <div class="item" data-nav="liked">Liked Songs</div>
+    <div class="item" data-nav="search">Search</div>
+    <div class="spacer"></div>
+    <div class="item" data-nav="logout">Sign out</div>
+  </nav>
+  <main id="main"><div class="title">Loading…</div></main>
+  <footer id="now">
+    <img id="now-art" alt="">
+    <div id="now-text"><div id="now-title">Nothing playing</div><div id="now-artist"></div></div>
+    <div id="now-state">▶</div>
+    <div id="now-status"></div>
+    <div id="now-bar"><div id="now-fill"></div></div>
+  </footer>
+</div>
+
+<script src="config.js"></script>
+<script src="auth.js"></script>
+<script src="app.js"></script>
+<script src="https://sdk.scdn.co/spotify-player.js"></script>
+</body></html>

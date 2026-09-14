@@ -1,0 +1,35 @@
+:root { --bg:#121212; --panel:#181818; --panel2:#222; --fg:#fff; --dim:#b3b3b3; --green:#1db954; --focus:#2a2a2a; }
+* { box-sizing:border-box }
+html, body { margin:0; height:100%; background:var(--bg); color:var(--fg); font:26px/1.35 system-ui, sans-serif; overflow:hidden }
+[hidden] { display:none !important }
+h1 { font-size:44px; margin:0 0 24px } p, ol { color:var(--dim); font-size:24px } code { color:var(--fg); background:#000; padding:2px 8px; border-radius:6px; font-size:22px }
+
+/* 10-foot UI: 5% overscan margin all round */
+#setup, #login { padding:8vh 10vw }
+#login { display:flex; flex-direction:column; align-items:center; justify-content:center; height:100% }
+#login .logo { width:120px; height:120px; border-radius:50%; background:var(--green); margin-bottom:24px }
+#login .hint { text-align:center; margin-top:28px; font-size:20px }
+button { font:inherit; color:inherit; background:var(--panel2); border:0; border-radius:40px; padding:16px 44px }
+
+#app { display:grid; grid-template-columns:300px 1fr; grid-template-rows:1fr 140px; height:100%; padding:4vh 4vw 0 }
+#side { display:flex; flex-direction:column; gap:6px; padding-right:24px; border-right:1px solid #2a2a2a }
+#side .spacer { flex:1 }
+#main { overflow:hidden; padding:0 0 0 32px }
+#main .title { font-size:36px; font-weight:700; margin-bottom:16px; color:var(--fg) }
+#main .list { overflow:hidden }
+#main input { width:100%; font:inherit; font-size:30px; color:var(--fg); background:var(--panel2); border:0; border-radius:12px; padding:14px 20px; margin-bottom:16px; outline:none }
+#main input:focus { box-shadow:0 0 0 4px var(--green) }
+
+.item { display:flex; align-items:center; gap:18px; padding:14px 18px; border-radius:10px; border-left:6px solid transparent; color:var(--dim); white-space:nowrap; overflow:hidden; text-overflow:ellipsis }
+.item .n { color:#666; min-width:44px; font-size:20px } .item .t { color:var(--fg); overflow:hidden; text-overflow:ellipsis } .item .s { color:var(--dim); font-size:21px; overflow:hidden; text-overflow:ellipsis }
+.item img { width:56px; height:56px; border-radius:6px; background:#333; flex:none }
+.item.focused { background:var(--focus); border-left-color:var(--green); color:var(--fg) }
+.item.playing .t { color:var(--green) }
+.empty { color:var(--dim); padding:20px 0 }
+
+#now { grid-column:1 / -1; display:grid; grid-template-columns:96px 1fr auto auto; grid-template-rows:1fr 6px; align-items:center; gap:0 24px; border-top:1px solid #2a2a2a; padding-top:12px }
+#now-art { width:80px; height:80px; border-radius:8px; background:#333; grid-row:1 }
+#now-title { font-weight:600 } #now-artist { color:var(--dim); font-size:22px }
+#now-state { font-size:34px; color:var(--green) }
+#now-status { color:#777; font-size:18px; max-width:400px; text-align:right }
+#now-bar { grid-column:1 / -1; height:6px; background:#333; border-radius:3px; margin-top:8px } #now-fill { height:100%; width:0; background:var(--green); border-radius:3px }

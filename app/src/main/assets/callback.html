@@ -1,0 +1,20 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Signing in…</title>
+<style>body{background:#121212;color:#eee;font:28px system-ui;display:grid;place-items:center;height:100vh;margin:0}.bad{color:#f55;font-size:22px;max-width:80vw}</style>
+</head><body><div id="msg">Signing in…</div>
+<script src="config.js"></script><script src="auth.js"></script>
+<script>
+(async () => {
+  const q = new URLSearchParams(location.search);
+  const msg = document.getElementById('msg');
+  try {
+    if (q.get('error')) throw new Error(q.get('error'));
+    await AUTH.exchange(q.get('code'));
+    location.replace('index.html');
+  } catch (e) {
+    msg.className = 'bad';
+    msg.textContent = 'Sign-in failed: ' + e.message + ' — press Back and try again.';
+    window.onTvBack = () => { location.replace('index.html'); return true; };
+  }
+})();
+</script></body></html>
