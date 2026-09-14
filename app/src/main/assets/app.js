@@ -40,7 +40,7 @@
       catch (e) { status('transfer: ' + e.message); }
     });
     player.addListener('not_ready', () => { deviceId = null; status('Device offline'); });
-    player.addListener('player_state_changed', s => { lastState = s; lastStateAt = Date.now(); renderNow(); markPlaying(); pushNative(); syncShuffle(!!s?.shuffle); });
+    player.addListener('player_state_changed', s => { lastState = s; lastStateAt = Date.now(); renderNow(); markPlaying(); pushNative(); syncShuffle(!!s?.shuffle, !!s?.disallows?.toggling_shuffle); });
     for (const ev of ['initialization_error', 'authentication_error', 'account_error', 'playback_error'])
       player.addListener(ev, ({ message }) => status(`${ev}: ${message}`));
     player.connect().then(ok => { if (!ok) status('SDK failed to connect'); });
@@ -106,18 +106,25 @@
       duration: s.duration || 0, paused: !!s.paused,
     };
   };
-  function syncShuffle(on) {
+  // Spotify disallows toggling shuffle in some contexts (playlists, in practice) and answers
+  // PUT /me/player/shuffle with 200 while ignoring it. The player reports this up front in
+  // actions.disallows, so say so rather than offering a switch that silently snaps back.
+  function syncShuffle(on, locked) {
     const item = document.querySelector('[data-nav="shuffle"]');
-    if (item) item.textContent = 'Shuffle: ' + (on ? 'On' : 'Off');
+    if (item) item.textContent = `Shuffle: ${on ? 'On' : 'Off'}${locked ? ' (locked)' : ''}`;
   }
   async function toggleShuffle() {
+    if (lastState?.disallows?.toggling_shuffle) {
+      status('Spotify locks shuffle for this playlist — play an album, or change it in the Spotify app');
+      return;
+    }
     const want = !(lastState && lastState.shuffle);
     syncShuffle(want);                                    // optimistic; corrected by the next state event
     try {
       await api(`/me/player/shuffle?state=${want}${deviceId ? '&device_id=' + deviceId : ''}`, { method: 'PUT' });
       status('Shuffle ' + (want ? 'on' : 'off'));
     } catch (e) {
-      syncShuffle(!want);
+      syncShuffle(!want, !!lastState?.disallows?.toggling_shuffle);
       status('shuffle: ' + e.message);
     }
   }
