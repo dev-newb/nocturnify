@@ -17,9 +17,12 @@
       ...opts, headers: { Authorization: 'Bearer ' + await AUTH.token(), 'Content-Type': 'application/json', ...(opts.headers || {}) },
     });
     if (r.status === 401 && retry) { await AUTH.refresh(); return api(path, opts, false); }
-    if (r.status === 204) return null;
     if (!r.ok) throw new Error(`${r.status} ${path}: ${(await r.text()).slice(0, 200)}`);
-    return r.json();
+    // Some endpoints answer with no body, and some (e.g. PUT /me/player/shuffle) answer 200
+    // with a non-JSON payload. Neither should throw — callers that need data check for it.
+    const txt = await r.text();
+    if (!txt) return null;
+    try { return JSON.parse(txt); } catch { return null; }
   }
 
   // ---------- Player (Web Playback SDK) ----------
@@ -37,7 +40,7 @@
       catch (e) { status('transfer: ' + e.message); }
     });
     player.addListener('not_ready', () => { deviceId = null; status('Device offline'); });
-    player.addListener('player_state_changed', s => { lastState = s; lastStateAt = Date.now(); renderNow(); markPlaying(); pushNative(); });
+    player.addListener('player_state_changed', s => { lastState = s; lastStateAt = Date.now(); renderNow(); markPlaying(); pushNative(); syncShuffle(!!s?.shuffle); });
     for (const ev of ['initialization_error', 'authentication_error', 'account_error', 'playback_error'])
       player.addListener(ev, ({ message }) => status(`${ev}: ${message}`));
     player.connect().then(ok => { if (!ok) status('SDK failed to connect'); });
@@ -103,6 +106,22 @@
       duration: s.duration || 0, paused: !!s.paused,
     };
   };
+  function syncShuffle(on) {
+    const item = document.querySelector('[data-nav="shuffle"]');
+    if (item) item.textContent = 'Shuffle: ' + (on ? 'On' : 'Off');
+  }
+  async function toggleShuffle() {
+    const want = !(lastState && lastState.shuffle);
+    syncShuffle(want);                                    // optimistic; corrected by the next state event
+    try {
+      await api(`/me/player/shuffle?state=${want}${deviceId ? '&device_id=' + deviceId : ''}`, { method: 'PUT' });
+      status('Shuffle ' + (want ? 'on' : 'off'));
+    } catch (e) {
+      syncShuffle(!want);
+      status('shuffle: ' + e.message);
+    }
+  }
+
   function openViz() { screen = 'viz'; VIZ.start({ state: vizState }); }
   // The SDK can strand playback at exactly end-of-track: is_playing stays true, position
   // never moves, and it never rolls over. Nudge it along.
@@ -316,6 +335,7 @@
 
   async function go(v) {
     if (v.name === 'viz') { openViz(); return; }     // overlay: leave the current view intact underneath
+    if (v.name === 'shuffle') { toggleShuffle(); return; }   // a toggle, not a destination
     view = v; if (!views[v.name]) return;
     main.innerHTML = '<div class="title">Loading…</div>';
     try { await views[v.name](v); } catch (e) { main.innerHTML = `<div class="title">Error</div><div class="empty">${esc(e.message)}</div>`; status(e.message); }
