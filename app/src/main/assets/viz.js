@@ -222,7 +222,9 @@
       if (p.z < 0.06 || x < -220 || x > W + 220 || y < -220 || y > H + 220) {
         if (p.comet) { p.comet = false; cometCount--; }
         p.dx = (rnd() - 0.5) * 2; p.dy = (rnd() - 0.5) * 2; p.z = 1;
-        p.sx = null; p.sy = null; p.tail = null; p.vis = false;
+        // cx/cy must be cleared too: the final pass copies them into sx/sy for every particle,
+        // so a stale pre-respawn position would be drawn as a stray segment next frame.
+        p.sx = null; p.sy = null; p.cx = null; p.cy = null; p.tail = null; p.vis = false;
         if (cometCount === 0 && rnd() < 0.04) { p.comet = true; p.tail = []; cometCount++; }
         continue;
       }
