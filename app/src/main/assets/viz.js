@@ -10,11 +10,15 @@
   const W = 1280, H = 720;
   const NPART = 240;
   const FPS = 60;             // load reduction didn't correlate with the audio gaps — restored
-  const MODES = ['Drift', 'Orbit', 'Aurora'];
+  const MODES = ['Drift', 'Orbit', 'Aurora', 'Nebula', 'Starfield', 'Ribbons'];
+  const AUTO = MODES.length;            // hidden slot: sits between the last and first
+  const TRAIL = [0.135, 0.135, 0.09, 0.055, 0.30, 0.10];   // per-mode trail persistence
+  const HOLD = 22, FADE = 5;            // Auto: seconds held, seconds cross-fading
   const ART_CY = H * 0.355, ART_SZ = 268;
 
   let cv, ctx, raf = 0, opts = null, running = false;
-  let parts = [], sprites = [], curtains = [], glow = null, pal = null, prevPal = null, palMix = 1;
+  let poolA = [], poolB = [], sprites = [], curtains = [], glow = null, pal = null, prevPal = null, palMix = 1;
+  let autoIdx = 0, autoT = 0, autoNextReady = -1;
   let lastDraw = 0;
   let artImg = null, artUrl = '', lastTrack = '';
   let seed = 1, tPrev = 0, tNow = 0, mode = 0, modeUntil = 0, seekPreview = null, seekShown = null;
@@ -25,7 +29,7 @@
   const rgb = c => `rgb(${c[0] | 0},${c[1] | 0},${c[2] | 0})`;
   const mmss = ms => { const t = Math.max(0, Math.floor((ms || 0) / 1000)); return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}`; };
 
-  try { mode = Math.max(0, Math.min(MODES.length - 1, parseInt(localStorage.viz_mode || '0', 10) || 0)); } catch (e) {}
+  try { mode = Math.max(0, Math.min(AUTO, parseInt(localStorage.viz_mode || '0', 10) || 0)); } catch (e) {}
 
   // ---- palette straight out of the cover art -------------------------------
   async function palette(url) {
@@ -95,16 +99,30 @@
     });
   }
 
-  function spawn(p, fresh) {
-    p.x = rnd() * W; p.y = rnd() * H;
-    p.sp = 14 + rnd() * 46;
-    p.sz = 12 + rnd() * 46;
-    p.si = (rnd() * Math.max(1, sprites.length)) | 0;
-    p.life = 3 + rnd() * 7;
-    p.age = fresh ? rnd() * p.life : 0;
-    p.r = 120 + rnd() * 900;                 // orbit radius: far past the viewport, so rings overflow
-    p.a = rnd() * Math.PI * 2;               // orbit angle
-    p.dir = rnd() < 0.5 ? -1 : 1;
+  const mkPool = n => Array.from({ length: n }, () => ({}));
+
+  // Each mode owns how it seeds and draws a pool. Every alpha is multiplied by `w` so two
+  // modes can be drawn at once and cross-faded (Auto) without any offscreen buffers.
+  function initFor(id, pool) {
+    for (const p of pool) {
+      p.x = rnd() * W; p.y = rnd() * H;
+      p.sp = 14 + rnd() * 46;
+      p.sz = 12 + rnd() * 46;
+      p.si = (rnd() * Math.max(1, sprites.length)) | 0;
+      p.life = 3 + rnd() * 7;
+      p.age = rnd() * p.life;
+      p.r = 120 + rnd() * 900;                 // Orbit radius
+      p.a = rnd() * Math.PI * 2;
+      p.dir = rnd() < 0.5 ? -1 : 1;
+      // Nebula: few, huge, slow
+      p.nr = 170 + rnd() * 380;
+      p.nvx = (rnd() - 0.5) * 14; p.nvy = (rnd() - 0.5) * 10;
+      p.nph = rnd() * Math.PI * 2;
+      // Starfield: normalised direction + depth
+      p.dx = (rnd() - 0.5) * 2; p.dy = (rnd() - 0.5) * 2;
+      p.z = 0.05 + rnd() * 0.95;
+      p.sx = null; p.sy = null;
+    }
   }
 
   function field(x, y, t, k) {
@@ -114,41 +132,128 @@
          + Math.sin((x + y) * s * 0.55 + t * 0.12) * 1.25;
   }
 
-  function drawParticles(dt, moving, k) {
+  function mDrift(pool, w, dt, mv, k) {
     ctx.globalCompositeOperation = 'lighter';
-    if (mode === 2) {                                   // Aurora: layered curtains
-      if (!curtains.length) return;
-      for (let i = 0; i < 7; i++) {
-        const x = W / 2 + Math.sin(tNow * 0.17 + i * 1.7) * W * 0.36;
-        const w = 130 + Math.sin(tNow * 0.23 + i * 2.1) * 70;
-        const hh = H * (0.75 + Math.sin(tNow * 0.13 + i) * 0.18);
-        const y = H * 0.5 - hh / 2 + Math.sin(tNow * 0.11 + i * 0.9) * 40;
-        ctx.globalAlpha = 0.20;
-        ctx.drawImage(curtains[i % curtains.length], x - w / 2, y, w, hh);
-      }
-      ctx.globalAlpha = 1;
-      return;
-    }
-    for (const p of parts) {
-      if (mode === 1) {                                 // Orbit: elliptical rings round the art
-        p.a += p.dir * (0.34 / (0.45 + p.r / 300)) * dt * moving;
-        p.x = W / 2 + Math.cos(p.a) * p.r;
-        p.y = H / 2 + Math.sin(p.a) * p.r * 0.62;
-        p.age += dt * moving;
-        if (p.age > p.life) spawn(p, false);
-      } else {                                          // Drift: flow field
-        const ang = field(p.x, p.y, tNow, k);
-        p.x += Math.cos(ang) * p.sp * dt * moving;
-        p.y += Math.sin(ang) * p.sp * dt * moving;
-        p.age += dt * moving;
-        if (p.age > p.life || p.x < -60 || p.x > W + 60 || p.y < -60 || p.y > H + 60) spawn(p, false);
+    for (const p of pool) {
+      const ang = field(p.x, p.y, tNow, k);
+      p.x += Math.cos(ang) * p.sp * dt * mv;
+      p.y += Math.sin(ang) * p.sp * dt * mv;
+      p.age += dt * mv;
+      if (p.age > p.life || p.x < -60 || p.x > W + 60 || p.y < -60 || p.y > H + 60) {
+        p.x = rnd() * W; p.y = rnd() * H; p.age = 0;
       }
       const f = Math.sin(Math.min(1, p.age / p.life) * Math.PI);
-      const s = sprites[p.si]; if (!s) continue;
-      ctx.globalAlpha = 0.30 * f;
-      ctx.drawImage(s, p.x - p.sz / 2, p.y - p.sz / 2, p.sz, p.sz);
+      const sp = sprites[p.si]; if (!sp) continue;
+      ctx.globalAlpha = 0.30 * f * w;
+      ctx.drawImage(sp, p.x - p.sz / 2, p.y - p.sz / 2, p.sz, p.sz);
     }
     ctx.globalAlpha = 1;
+  }
+
+  function mOrbit(pool, w, dt, mv) {
+    ctx.globalCompositeOperation = 'lighter';
+    for (const p of pool) {
+      p.a += p.dir * (0.34 / (0.45 + p.r / 300)) * dt * mv;
+      const x = W / 2 + Math.cos(p.a) * p.r;
+      const y = H / 2 + Math.sin(p.a) * p.r * 0.62;
+      p.age += dt * mv;
+      if (p.age > p.life) p.age = 0;
+      const f = Math.sin(Math.min(1, p.age / p.life) * Math.PI);
+      const sp = sprites[p.si]; if (!sp) continue;
+      ctx.globalAlpha = 0.30 * f * w;
+      ctx.drawImage(sp, x - p.sz / 2, y - p.sz / 2, p.sz, p.sz);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function mAurora(pool, w) {
+    if (!curtains.length) return;
+    ctx.globalCompositeOperation = 'lighter';
+    for (let i = 0; i < 7; i++) {
+      const x = W / 2 + Math.sin(tNow * 0.17 + i * 1.7) * W * 0.36;
+      const cw = 130 + Math.sin(tNow * 0.23 + i * 2.1) * 70;
+      const hh = H * (0.75 + Math.sin(tNow * 0.13 + i) * 0.18);
+      const y = H * 0.5 - hh / 2 + Math.sin(tNow * 0.11 + i * 0.9) * 40;
+      ctx.globalAlpha = 0.20 * w;
+      ctx.drawImage(curtains[i % curtains.length], x - cw / 2, y, cw, hh);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  // Nebula — a few enormous soft clouds, slowly breathing and drifting past each other.
+  function mNebula(pool, w, dt, mv) {
+    ctx.globalCompositeOperation = 'lighter';
+    const n = Math.min(pool.length, 30);
+    for (let i = 0; i < n; i++) {
+      const p = pool[i];
+      p.x += p.nvx * dt * mv; p.y += p.nvy * dt * mv;
+      p.nph += dt * mv * 0.25;
+      if (p.x < -p.nr) p.x = W + p.nr; else if (p.x > W + p.nr) p.x = -p.nr;
+      if (p.y < -p.nr) p.y = H + p.nr; else if (p.y > H + p.nr) p.y = -p.nr;
+      const r = p.nr * (0.86 + Math.sin(p.nph) * 0.14);
+      const sp = sprites[p.si]; if (!sp) continue;
+      ctx.globalAlpha = 0.085 * w;
+      ctx.drawImage(sp, p.x - r, p.y - r, r * 2, r * 2);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  // Starfield — perspective streaks rushing outward from the centre.
+  function mStars(pool, w, dt, mv) {
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.lineCap = 'round';
+    for (const p of pool) {
+      const px = W / 2 + (p.dx / p.z) * 210;
+      const py = H / 2 + (p.dy / p.z) * 210;
+      p.z -= dt * mv * 0.34;
+      if (p.z < 0.06 || px < -200 || px > W + 200 || py < -200 || py > H + 200) {
+        p.dx = (rnd() - 0.5) * 2; p.dy = (rnd() - 0.5) * 2; p.z = 1;
+        p.sx = null; p.sy = null; continue;
+      }
+      const x = W / 2 + (p.dx / p.z) * 210;
+      const y = H / 2 + (p.dy / p.z) * 210;
+      if (p.sx != null) {
+        const c = pal.acc[p.si % pal.acc.length] || [200, 210, 240];
+        ctx.strokeStyle = `rgba(${c[0] | 0},${c[1] | 0},${c[2] | 0},${(0.55 * (1 - p.z) * w).toFixed(3)})`;
+        ctx.lineWidth = Math.max(1, (1 - p.z) * 3.4);
+        ctx.beginPath(); ctx.moveTo(p.sx, p.sy); ctx.lineTo(x, y); ctx.stroke();
+      }
+      p.sx = x; p.sy = y;
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  // Ribbons — long silk bands woven from summed sines.
+  function mRibbons(pool, w) {
+    ctx.globalCompositeOperation = 'lighter';
+    const bands = 6, step = 26;
+    for (let b = 0; b < bands; b++) {
+      const c = pal.acc[b % pal.acc.length] || [180, 200, 235];
+      const ph = b * 1.24, amp = H * (0.10 + (b % 3) * 0.045);
+      ctx.strokeStyle = `rgba(${c[0] | 0},${c[1] | 0},${c[2] | 0},${(0.20 * w).toFixed(3)})`;
+      ctx.lineWidth = 10 + (b % 3) * 7;
+      ctx.beginPath();
+      for (let x = -step; x <= W + step; x += step) {
+        const y = H / 2
+          + Math.sin(x * 0.0043 + tNow * 0.42 + ph) * amp
+          + Math.sin(x * 0.0017 - tNow * 0.25 + ph * 1.7) * amp * 0.7
+          + Math.sin(tNow * 0.15 + ph) * 40;
+        if (x <= -step) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function renderMode(id, pool, w, dt, mv, k) {
+    switch (id) {
+      case 0: return mDrift(pool, w, dt, mv, k);
+      case 1: return mOrbit(pool, w, dt, mv);
+      case 2: return mAurora(pool, w);
+      case 3: return mNebula(pool, w, dt, mv);
+      case 4: return mStars(pool, w, dt, mv);
+      case 5: return mRibbons(pool, w);
+    }
   }
 
   function drawArt(cx, cy, size) {
@@ -221,11 +326,33 @@
     const bg = prevPal ? pal.bg.map((v, i) => lerp(prevPal.bg[i], v, palMix)) : pal.bg;
     const prog = st.duration ? Math.min(1, st.position / st.duration) : 0;
 
+    // Auto holds a mode, then cross-fades into the next by drawing both with complementary
+    // weights — no offscreen buffers; every mode scales its own alphas by w.
+    let curMode = mode, nxtMode = -1, mixW = 0;
+    if (mode === AUTO) {
+      autoT += dt * moving;
+      if (autoT >= HOLD + FADE) {
+        autoT -= HOLD + FADE;
+        autoIdx = (autoIdx + 1) % MODES.length;
+        const sw = poolA; poolA = poolB; poolB = sw;   // the faded-in pool becomes current
+        autoNextReady = -1; modeUntil = tNow + 2;
+      }
+      curMode = autoIdx;
+      if (autoT > HOLD) {
+        nxtMode = (autoIdx + 1) % MODES.length;
+        mixW = (autoT - HOLD) / FADE;
+        if (autoNextReady !== nxtMode) { initFor(nxtMode, poolB); autoNextReady = nxtMode; }
+      }
+    }
+    const trail = nxtMode >= 0 ? lerp(TRAIL[curMode], TRAIL[nxtMode], mixW) : TRAIL[curMode];
+
     ctx.globalCompositeOperation = 'source-over';
-    ctx.fillStyle = `rgba(${bg[0] | 0},${bg[1] | 0},${bg[2] | 0},${mode === 2 ? 0.09 : 0.135})`;
+    ctx.fillStyle = `rgba(${bg[0] | 0},${bg[1] | 0},${bg[2] | 0},${trail})`;
     ctx.fillRect(0, 0, W, H);
 
-    drawParticles(dt, moving, 0.75 + prog * 0.8);
+    const k = 0.75 + prog * 0.8;
+    renderMode(curMode, poolA, nxtMode >= 0 ? 1 - mixW : 1, dt, moving, k);
+    if (nxtMode >= 0) renderMode(nxtMode, poolB, mixW, dt, moving, k);
 
     ctx.globalCompositeOperation = 'source-over';
     drawArt(W / 2, ART_CY, ART_SZ * (1 + Math.sin(tNow * 0.55) * 0.013));
@@ -268,7 +395,7 @@
       ctx.textAlign = 'right';
       ctx.fillStyle = 'rgba(255,255,255,0.85)';
       ctx.font = '600 24px system-ui, sans-serif';
-      ctx.fillText(MODES[mode], W - 112, 74);
+      ctx.fillText(mode === AUTO ? `Auto · ${MODES[autoIdx]}` : MODES[mode], W - 112, 74);
       ctx.globalAlpha = 1;
     }
   }
@@ -282,10 +409,10 @@
         cv.width = W; cv.height = H;
         host.appendChild(cv);
         ctx = cv.getContext('2d', { alpha: false });
-        parts = Array.from({ length: NPART }, () => ({}));
+        poolA = mkPool(NPART); poolB = mkPool(NPART);
       }
       seed = hash(lastTrack || 'x') || 1;
-      parts.forEach(p => spawn(p, true));
+      initFor(mode === AUTO ? autoIdx : mode, poolA);
       ctx.fillStyle = '#07070b'; ctx.fillRect(0, 0, W, H);
       host.hidden = false;
       running = true; tPrev = 0;
@@ -298,13 +425,14 @@
       if (host) host.hidden = true;
     },
     cycle(d) {
-      mode = (mode + d + MODES.length) % MODES.length;
+      mode = (mode + d + AUTO + 1) % (AUTO + 1);   // AUTO sits past the last real mode
       try { localStorage.viz_mode = String(mode); } catch (e) {}
       modeUntil = tNow + 2;
-      parts.forEach(p => spawn(p, true));
-      return MODES[mode];
+      if (mode === AUTO) { autoT = 0; autoIdx = 0; autoNextReady = -1; }
+      initFor(mode === AUTO ? autoIdx : mode, poolA);
+      return this.modeName();
     },
-    modeName: () => MODES[mode],
+    modeName: () => (mode === AUTO ? 'Auto' : MODES[mode]),
     setSeekPreview(ms) { seekPreview = ms; },
   };
 })();
