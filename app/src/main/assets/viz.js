@@ -8,8 +8,8 @@
 // quantised from the cover art's actual pixels.
 (function () {
   const W = 1280, H = 720;
-  const NPART = 170;          // was 240 — less CPU for the audio thread to compete with
-  const FPS = 30;             // ambient drift reads identically at 30; halves per-frame work
+  const NPART = 240;
+  const FPS = 60;             // load reduction didn't correlate with the audio gaps — restored
   const MODES = ['Drift', 'Orbit', 'Aurora'];
   const ART_CY = H * 0.355, ART_SZ = 268;
 
@@ -222,7 +222,7 @@
     const prog = st.duration ? Math.min(1, st.position / st.duration) : 0;
 
     ctx.globalCompositeOperation = 'source-over';
-    ctx.fillStyle = `rgba(${bg[0] | 0},${bg[1] | 0},${bg[2] | 0},${mode === 2 ? 0.17 : 0.25})`;
+    ctx.fillStyle = `rgba(${bg[0] | 0},${bg[1] | 0},${bg[2] | 0},${mode === 2 ? 0.09 : 0.135})`;
     ctx.fillRect(0, 0, W, H);
 
     drawParticles(dt, moving, 0.75 + prog * 0.8);
