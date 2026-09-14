@@ -6,6 +6,8 @@
   const status = m => { $('#now-status').textContent = m; console.log('[status]', m); };
   let screen = 'login';   // 'login' | 'app' — decides how the remote OK key is routed
   let userId = null;      // signed-in user's id, for owned-vs-followed playlist logic
+  let ctxName = '';       // what's playing (playlist / Liked Songs / search), shown in the visualiser
+  let idleTimer = null;
 
   // ---------- Web API ----------
   async function api(path, opts = {}, retry = true) {
@@ -38,6 +40,16 @@
       player.addListener(ev, ({ message }) => status(`${ev}: ${message}`));
     player.connect().then(ok => { if (!ok) status('SDK failed to connect'); });
   };
+
+  // The SDK's resume() can silently no-op; toggling against fresh state always works.
+  async function setPlaying(want) {
+    if (!player) return;
+    let st = null;
+    try { st = await player.getCurrentState(); } catch (e) {}
+    const paused = st ? st.paused : (lastState ? lastState.paused : true);
+    if (want === paused) player.togglePlay();
+  }
+  window.tvSetPlaying = setPlaying;   // also called by the MediaSession (notification / remote)
 
   async function play(body) {
     if (!deviceId) { status('Player not ready yet'); return; }
@@ -78,13 +90,21 @@
     return {
       uri: t?.uri || '', title: t?.name || '',
       artist: (t?.artists || []).map(a => a.name).join(', '),
+      album: t?.album?.name || '',
+      context: s.context?.metadata?.context_description || ctxName || '',
       artUrl: t?.album?.images?.[0]?.url || '',
       position: s.paused ? s.position : Math.min(s.duration, s.position + (Date.now() - lastStateAt)),
       duration: s.duration || 0, paused: !!s.paused,
     };
   };
   function openViz() { screen = 'viz'; VIZ.start({ state: vizState }); }
-  function closeViz() { VIZ.stop(); screen = 'app'; }
+  function resetIdle() {
+    if (idleTimer) clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => {
+      if (screen === 'app' && lastState && !lastState.paused) openViz();   // screensaver-style
+    }, 60000);
+  }
+  function closeViz() { VIZ.stop(); screen = 'app'; resetIdle(); }
 
   function markPlaying() {
     const uri = lastState?.track_window?.current_track?.uri;
@@ -118,8 +138,8 @@
         const meta = [count != null ? `${count} track${count === 1 ? '' : 's'}` : null, p.owner?.display_name].filter(Boolean).join(' · ');
         row.append(el('div', '', `<div class="t">${esc(p.name)}</div><div class="s">${esc(meta)}</div>`));
         row.onactivate = () => {
-          if (p.owner?.id && p.owner.id === userId) go({ name: 'playlist', id: p.id, title: p.name, uri: p.uri });
-          else { play({ context_uri: p.uri }); status('Playing ' + p.name); }   // followed: track list is 403, play whole
+          if (p.owner?.id && p.owner.id === userId) { ctxName = p.name; go({ name: 'playlist', id: p.id, title: p.name, uri: p.uri }); }
+          else { ctxName = p.name; play({ context_uri: p.uri }); status('Playing ' + p.name); }   // followed: track list is 403, play whole
         };
         list.append(row);
       }
@@ -135,6 +155,7 @@
       setMain(title, list); markPlaying();
     },
     async liked() {
+      ctxName = 'Liked Songs';
       const list = el('div', 'list');
       const r = await api('/me/tracks?limit=50');
       const tracks = (r.items || []).map(x => x.track).filter(t => t && t.uri);
@@ -150,6 +171,7 @@
       input.addEventListener('keydown', async e => {
         if (e.key === 'Enter' && input.value.trim()) {
           e.preventDefault(); input.blur();
+          ctxName = 'Search: ' + input.value.trim();
           results.innerHTML = '<div class="empty">Searching…</div>';
           try {
             // Dev-mode caps search at limit=10 (20+ -> 400 Invalid limit).
@@ -203,13 +225,16 @@
   }
 
   document.addEventListener('keydown', e => {
+    resetIdle();
     const k = e.key;
     if (screen === 'viz') {
       if (k === 'Enter' || k === 'MediaPlayPause' || e.keyCode === 13 || e.keyCode === 23) player?.togglePlay();
       else if (k === 'ArrowRight' || k === 'MediaTrackNext') player?.nextTrack();
       else if (k === 'ArrowLeft' || k === 'MediaTrackPrevious') player?.previousTrack();
+      else if (k === 'ArrowUp') VIZ.cycle(1);        // D-pad up/down: the one control every
+      else if (k === 'ArrowDown') VIZ.cycle(-1);     // Android TV remote has and we don't use
       else return;
-      VIZ.poke(); e.preventDefault(); return;
+      e.preventDefault(); return;
     }
     if (screen === 'login') {
       if (k === 'Enter' || k === 'Spacebar' || e.keyCode === 13 || e.keyCode === 23) { AUTH.login(); e.preventDefault(); }
@@ -227,8 +252,8 @@
 
   // Called from MainActivity for remote transport keys (Android keycodes) and Back.
   window.onTvKey = code => {
-    ({ 85: () => player?.togglePlay(), 126: () => player?.resume(), 127: () => player?.pause(),
-       87: () => player?.nextTrack(), 88: () => player?.previousTrack(), 86: () => player?.pause() })[code]?.();
+    ({ 85: () => player?.togglePlay(), 126: () => setPlaying(true), 127: () => setPlaying(false),
+       87: () => player?.nextTrack(), 88: () => player?.previousTrack(), 86: () => setPlaying(false) })[code]?.();
   };
   window.onTvBack = () => {
     if (screen === 'viz') { closeViz(); return true; }
@@ -250,6 +275,7 @@
     screen = 'app';
     $('#app').hidden = false;
     status('Connecting player…');
+    resetIdle();
     go({ name: 'home' });
   })();
 })();

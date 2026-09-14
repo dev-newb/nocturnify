@@ -110,11 +110,11 @@ class PlaybackService : android.app.Service() {
             if (session != null) return
             session = MediaSessionCompat(ctx.applicationContext, "SpotifyTV").apply {
                 setCallback(object : MediaSessionCompat.Callback() {
-                    override fun onPlay() { controlSink?.invoke("window.player && player.resume()") }
-                    override fun onPause() { controlSink?.invoke("window.player && player.pause()") }
+                    override fun onPlay() { controlSink?.invoke("window.tvSetPlaying && tvSetPlaying(true)") }
+                    override fun onPause() { controlSink?.invoke("window.tvSetPlaying && tvSetPlaying(false)") }
                     override fun onSkipToNext() { controlSink?.invoke("window.player && player.nextTrack()") }
                     override fun onSkipToPrevious() { controlSink?.invoke("window.player && player.previousTrack()") }
-                    override fun onStop() { controlSink?.invoke("window.player && player.pause()") }
+                    override fun onStop() { controlSink?.invoke("window.tvSetPlaying && tvSetPlaying(false)") }
                 })
                 isActive = true
             }
