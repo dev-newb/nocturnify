@@ -66,6 +66,11 @@ class MainActivity : Activity() {
         web.loadUrl("$ORIGIN/assets/$page")
     }
 
+    override fun onNewIntent(intent: android.content.Intent) {
+        super.onNewIntent(intent)
+        intent.getStringExtra("page")?.let { web.loadUrl("$ORIGIN/assets/$it") }
+    }
+
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
         when (keyCode) {
             // Give the page first refusal on Back; it returns true if it closed a view.

@@ -53,8 +53,13 @@
       return t;
     },
 
-    async refresh() {
-      return tokenRequest({ grant_type: 'refresh_token', refresh_token: localStorage[LS.refresh] });
+    _refreshing: null,
+    refresh() {
+      if (!this._refreshing) {
+        this._refreshing = tokenRequest({ grant_type: 'refresh_token', refresh_token: localStorage[LS.refresh] })
+          .finally(() => { this._refreshing = null; });
+      }
+      return this._refreshing;
     },
 
     // Always hand out a token with at least a minute left; refresh transparently otherwise.

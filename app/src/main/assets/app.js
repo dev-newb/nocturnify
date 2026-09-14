@@ -65,7 +65,7 @@
   // ---------- Views ----------
   const main = $('#main');
   let view = { name: 'home' };
-  const setMain = (title, node) => { main.innerHTML = ''; main.append(el('div', 'title', esc(title)), node); focus.enter('main'); };
+  const setMain = (title, node) => { main.innerHTML = ''; main.append(el('div', 'title', esc(title)), node); focus.enter('main', 0); };
 
   function trackRow(t, i, extra = {}) {
     const row = el('div', 'item');
