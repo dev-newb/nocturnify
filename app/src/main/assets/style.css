@@ -11,7 +11,7 @@ h1 { font-size:44px; margin:0 0 24px } p, ol { color:var(--dim); font-size:24px 
 #login .hint { text-align:center; margin-top:28px; font-size:20px }
 button { font:inherit; color:inherit; background:var(--panel2); border:0; border-radius:40px; padding:16px 44px }
 
-#app { display:grid; grid-template-columns:300px 1fr; grid-template-rows:minmax(0,1fr) 140px; height:100%; padding:4vh 6vw 0 4vw }
+#app { display:grid; grid-template-columns:300px 1fr; grid-template-rows:minmax(0,1fr) 140px; height:100%; padding:6vh 6vw 0 4vw }
 #side { display:flex; flex-direction:column; gap:6px; padding-right:24px; border-right:1px solid #2a2a2a; min-height:0; overflow:hidden }
 #side .spacer { flex:1 }
 #main { overflow:hidden; min-height:0; padding:0 24px 0 32px }

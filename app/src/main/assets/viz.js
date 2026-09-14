@@ -17,7 +17,7 @@
   const ART_CY = H * 0.355, ART_SZ = 268;
 
   let cv, ctx, raf = 0, opts = null, running = false;
-  let poolA = [], poolB = [], sprites = [], curtains = [], glow = null, pal = null, prevPal = null, palMix = 1;
+  let poolA = [], poolB = [], sprites = [], curtains = [], rings = [], glow = null, pal = null, prevPal = null, palMix = 1;
   let autoIdx = 0, autoT = 0, autoNextReady = -1;
   // accents from a near-black cover are almost invisible as thin strokes; lift them a little
   const lift = (c, m = 0.38) => [c[0] + (255 - c[0]) * m, c[1] + (255 - c[1]) * m, c[2] + (255 - c[2]) * m];
@@ -85,6 +85,20 @@
       rg.addColorStop(1, 'rgba(0,0,0,0)');
       g.fillStyle = rg; g.fillRect(0, 0, 256, 256);
     }
+    // Bloom draws rings, not blobs, so it doesn't read as "Drift in a circle"
+    rings = p.acc.map(c => {
+      const s = document.createElement('canvas'); s.width = s.height = 64;
+      const g = s.getContext('2d');
+      const rg = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+      const col = `${c[0] | 0},${c[1] | 0},${c[2] | 0}`;
+      rg.addColorStop(0.00, `rgba(${col},0)`);
+      rg.addColorStop(0.52, `rgba(${col},0.03)`);
+      rg.addColorStop(0.74, `rgba(${col},0.95)`);
+      rg.addColorStop(0.86, `rgba(${col},0.22)`);
+      rg.addColorStop(1.00, `rgba(${col},0)`);
+      g.fillStyle = rg; g.fillRect(0, 0, 64, 64);
+      return s;
+    });
     curtains = p.acc.map(c => {
       const s = document.createElement('canvas'); s.width = 64; s.height = 256;
       const g = s.getContext('2d');
@@ -125,9 +139,11 @@
       p.z = 0.05 + rnd() * 0.95;
       p.sx = null; p.sy = null; p.comet = false; p.tail = null;
       // Rain: column, fall speed, streak length
-      p.rx = rnd() * W; p.ry = rnd() * H; p.rs = 240 + rnd() * 520; p.rl = 16 + rnd() * 48;
+      p.rx = -W * 0.25 + rnd() * W * 1.5; p.ry = rnd() * H; p.rs = 240 + rnd() * 520;
+      p.rl = 12 + rnd() * 70; p.rw = 1.6 + rnd() * 4.4; p.rd = (rnd() - 0.5) * 18;
       // Bloom: orbiting seed point mirrored around the centre
       p.br = 40 + rnd() * 300; p.ba = rnd() * Math.PI * 2; p.bs = (0.15 + rnd() * 0.5) * (rnd() < 0.5 ? -1 : 1);
+      p.br0 = p.br; p.esc = 0; p.escArc = 0;   // home radius; escape stage 0=orbit 1=drift 2=rim
     }
   }
 
@@ -291,44 +307,92 @@
     ctx.globalAlpha = 1;
   }
 
-  // Bloom — rotational symmetry: a handful of orbiting points mirrored into eight arms,
-  // which is what turns a few particles into a mandala.
+  // Bloom — rotational symmetry: a handful of orbiting points mirrored into eight arms.
+  // Drawn as glowing rings of varying scale so the mandala reads as its own thing rather
+  // than the same soft dots Drift and Orbit use.
   function mBloom(pool, w, dt, mv) {
+    if (!rings.length) return;
     ctx.globalCompositeOperation = 'lighter';
-    const ARMS = 8, N = Math.min(pool.length, 26), TAU = Math.PI * 2;
+    const ARMS = 8, N = Math.min(pool.length, 24), TAU = Math.PI * 2;
+    let escaping = 0;
+    for (let i = 0; i < N; i++) if (pool[i].esc) escaping++;
+
     for (let i = 0; i < N; i++) {
       const p = pool[i];
-      p.ba += p.bs * dt * mv * 0.35;
-      const rr = p.br * (0.85 + Math.sin(tNow * 0.5 + i) * 0.15);
-      const sp = sprites[p.si % Math.max(1, sprites.length)]; if (!sp) continue;
-      const sz = p.sz * 0.75;
-      ctx.globalAlpha = 0.22 * w;
-      for (let kk = 0; kk < ARMS; kk++) {
-        const a = p.ba + (kk / ARMS) * TAU;
-        const x = W / 2 + Math.cos(a) * rr;
-        const y = H / 2 + Math.sin(a) * rr * 0.72;
-        ctx.drawImage(sp, x - sz / 2, y - sz / 2, sz, sz);
+      const sp = rings[p.si % rings.length]; if (!sp) continue;
+
+      if (p.esc === 0) {
+        p.ba += p.bs * dt * mv * 0.35;
+        // one at a time, and rarely — an escape should read as an event, not a burst
+        if (escaping === 0 && rnd() < dt * mv * 0.004) { p.esc = 1; p.escArc = 0; escaping++; }
       }
+
+      if (p.esc === 0) {
+        const rr = p.br * (0.85 + Math.sin(tNow * 0.5 + i) * 0.15);
+        const sz = (14 + p.sz * 1.15) * (0.75 + Math.sin(tNow * 0.7 + i * 1.9) * 0.25);
+        ctx.globalAlpha = (0.14 + 0.12 * (1 - i / N)) * w;
+        for (let kk = 0; kk < ARMS; kk++) {
+          const a2 = p.ba + (kk / ARMS) * TAU;
+          const x = W / 2 + Math.cos(a2) * rr;
+          const y = H / 2 + Math.sin(a2) * rr * 0.72;
+          ctx.drawImage(sp, x - sz / 2, y - sz / 2, sz, sz);
+        }
+        continue;
+      }
+
+      // Escaping: a SINGLE ring, no longer mirrored into the arms — the symmetry breaking is
+      // what makes it read as one ring leaving rather than an eight-fold burst.
+      // Distance from centre to the screen edge along this bearing (y is squashed 0.72):
+      const m = 46;
+      const ca = Math.abs(Math.cos(p.ba)), sa = Math.abs(Math.sin(p.ba));
+      const edgeR = Math.min(ca > 1e-3 ? (W / 2 + m) / ca : 1e6,
+                             sa > 1e-3 ? (H / 2 + m) / (0.72 * sa) : 1e6);
+      if (p.esc === 1) {
+        p.br += 52 * dt * mv;                     // a slow drift out, not a launch
+        p.ba += p.bs * dt * mv * 0.18;
+        if (p.br >= edgeR) { p.esc = 2; p.escArc = 0; }
+      } else {
+        p.br = edgeR;                             // hug the rim and slide along it, half off-screen
+        const dir = p.bs < 0 ? -1 : 1;
+        p.ba += 0.30 * dt * mv * dir;
+        p.escArc += 0.30 * dt * mv;
+        if (p.escArc > 1.9) { p.esc = 0; p.br = p.br0; escaping--; }
+      }
+      const grow = 1 + Math.max(0, p.br - p.br0) / 250;    // swells as it nears the edge
+      const sz = (14 + p.sz * 1.15) * grow;
+      const fade = p.esc === 2 ? Math.max(0, 1 - p.escArc / 1.9) : 1;
+      ctx.globalAlpha = 0.26 * fade * w;
+      const x = W / 2 + Math.cos(p.ba) * p.br;
+      const y = H / 2 + Math.sin(p.ba) * p.br * 0.72;
+      ctx.drawImage(sp, x - sz / 2, y - sz / 2, sz, sz);
     }
     ctx.globalAlpha = 1;
   }
 
-  // Rain — directional fall with a slow lateral sway, drawn with the pre-rendered vertical
-  // gradient strips (the same sprites Aurora uses). Stroked, this mode benchmarked at 89%
-  // janky frames; as drawImage it costs the same as Drift.
+  // Rain — directional fall. Wind is global, so instead of transforming 210 sprites the
+  // canvas is rotated ONCE per frame and every streak is drawn vertically inside it; they
+  // tilt together the way real wind-blown rain does, for one matrix op. The field is spawned
+  // wider than the screen so the rotated corners stay covered.
   function mRain(pool, w, dt, mv) {
     if (!curtains.length) return;
+    // two slow out-of-phase sines: a gentle, non-repeating gust rather than a metronome
+    const gust = Math.sin(tNow * 0.085) * 0.62 + Math.sin(tNow * 0.031 + 1.3) * 0.38;
+    const tilt = gust * 0.17;                       // radians, ~10 degrees at full gust
     ctx.globalCompositeOperation = 'lighter';
+    ctx.save();
+    ctx.translate(W / 2, 0); ctx.rotate(tilt); ctx.translate(-W / 2, 0);
     const nc = curtains.length;
     for (const p of pool) {
       p.ry += p.rs * dt * mv;
-      p.rx += Math.sin(tNow * 0.3 + p.ry * 0.004) * 14 * dt * mv;
-      if (p.ry - p.rl > H) { p.ry = -p.rl - rnd() * 240; p.rx = rnd() * W; }
+      p.rx += (gust * 26 + p.rd) * dt * mv;         // drift with the gust, plus its own bias
+      if (p.ry - p.rl > H + 40) { p.ry = -p.rl - rnd() * 260; p.rx = -W * 0.25 + rnd() * W * 1.5; }
+      if (p.rx < -W * 0.3) p.rx += W * 1.6; else if (p.rx > W * 1.3) p.rx -= W * 1.6;
       const near = p.rs > 600 ? 1 : (p.rs > 420 ? 0.68 : 0.42);
-      const cw = 2 + near * 4.5;
-      ctx.globalAlpha = (0.16 + near * 0.34) * w;
+      const cw = p.rw * (0.55 + near * 0.85);       // per-streak width, scaled by depth
+      ctx.globalAlpha = (0.14 + near * 0.34) * w;
       ctx.drawImage(curtains[p.si % nc], p.rx - cw / 2, p.ry - p.rl, cw, p.rl);
     }
+    ctx.restore();
     ctx.globalAlpha = 1;
   }
 
