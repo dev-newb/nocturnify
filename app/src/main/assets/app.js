@@ -9,9 +9,6 @@
   let ctxName = '';       // what's playing (playlist / Liked Songs / search), shown in the visualiser
   let idleTimer = null;
   let logoutArmed = false;
-  let tempoFor = '';
-  let rate = 1;           // tempo-derived motion rate for the visualiser (1 = unknown/default)
-  const bpmCache = {};    // trackId -> bpm (0 = looked up, none available)
 
   // ---------- Web API ----------
   async function api(path, opts = {}, retry = true) {
@@ -39,10 +36,7 @@
       catch (e) { status('transfer: ' + e.message); }
     });
     player.addListener('not_ready', () => { deviceId = null; status('Device offline'); });
-    player.addListener('player_state_changed', s => { lastState = s; lastStateAt = Date.now(); renderNow(); markPlaying(); pushNative();
-      const tid = s?.track_window?.current_track?.id;
-      if (tid && tid !== tempoFor) { tempoFor = tid; lookupTempo(tid); }
-    });
+    player.addListener('player_state_changed', s => { lastState = s; lastStateAt = Date.now(); renderNow(); markPlaying(); pushNative(); });
     for (const ev of ['initialization_error', 'authentication_error', 'account_error', 'playback_error'])
       player.addListener(ev, ({ message }) => status(`${ev}: ${message}`));
     player.connect().then(ok => { if (!ok) status('SDK failed to connect'); });
@@ -78,38 +72,11 @@
     const pos = s.paused ? s.position : Math.min(s.duration, s.position + (Date.now() - lastStateAt));
     $('#now-fill').style.width = (100 * pos / s.duration).toFixed(2) + '%';
   }, 500);
-  // Tempo -> motion RATE only. We have no beat phase (see research: /audio-analysis is 403),
-  // so nothing is allowed to "hit" — a wrong rate just looks slightly fast or slow, whereas a
-  // wrong phase visibly misses. Deezer covers ~60% of tracks; the rest stay at 1.
-  window.tvBpm = (id, bpm) => {
-    bpmCache[id] = bpm || 0;
-    try { localStorage['bpm_' + id] = String(bpm || 0); } catch (e) {}
-    if (lastState?.track_window?.current_track?.id === id) applyRate(bpm);
-  };
-  function applyRate(bpm) {
-    rate = bpm > 0 ? Math.max(0.6, Math.min(1.6, bpm / 100)) : 1;
-  }
-  async function lookupTempo(id) {
-    if (!id) { rate = 1; return; }
-    if (id in bpmCache) { applyRate(bpmCache[id]); return; }
-    let cached = null;
-    try { cached = localStorage['bpm_' + id]; } catch (e) {}
-    if (cached != null) { bpmCache[id] = +cached; applyRate(+cached); return; }
-    rate = 1;
-    try {
-      const t = await api('/tracks/' + id);                       // Spotify sends ACAO:*
-      const isrc = t?.external_ids?.isrc;
-      if (!isrc) { bpmCache[id] = 0; return; }
-      window.AndroidBridge?.postMessage(JSON.stringify({ type: 'bpm', id, isrc }));
-    } catch (e) { bpmCache[id] = 0; }
-  }
-
   // Mirror current play state to the native MediaSession + foreground service (background audio).
   function pushNative() {
     try {
       const t = lastState?.track_window?.current_track;
       window.AndroidBridge?.postMessage(JSON.stringify({
-        type: 'state',
         playing: lastState ? !lastState.paused : false,
         title: t?.name || '',
         artist: (t?.artists || []).map(a => a.name).join(', '),
@@ -122,7 +89,6 @@
     const s = lastState; if (!s) return {};
     const t = s.track_window?.current_track;
     return {
-      rate,
       uri: t?.uri || '', title: t?.name || '',
       artist: (t?.artists || []).map(a => a.name).join(', '),
       album: t?.album?.name || '',
@@ -140,6 +106,23 @@
     }, 60000);
   }
   function closeViz() { VIZ.stop(); screen = 'app'; resetIdle(); }
+
+  // Seeking from the visualiser. Presses accumulate against a local target and fire a single
+  // seek once you stop, so holding the key scrubs smoothly instead of spamming the SDK.
+  let seekTarget = null, seekTimer = null;
+  function seekBy(deltaMs) {
+    const st = vizState();
+    if (!st.duration) return;
+    const base = seekTarget != null ? seekTarget : st.position;
+    seekTarget = Math.max(0, Math.min(st.duration - 1500, base + deltaMs));
+    VIZ.setSeekPreview(seekTarget);
+    clearTimeout(seekTimer);
+    seekTimer = setTimeout(() => {
+      const t = seekTarget; seekTarget = null;
+      Promise.resolve(player?.seek(t)).catch(() => {});
+      setTimeout(() => VIZ.setSeekPreview(null), 500);
+    }, 320);
+  }
 
   function markPlaying() {
     const uri = lastState?.track_window?.current_track?.uri;
@@ -273,8 +256,10 @@
     const k = e.key;
     if (screen === 'viz') {
       if (k === 'Enter' || k === 'MediaPlayPause' || e.keyCode === 13 || e.keyCode === 23) player?.togglePlay();
-      else if (k === 'ArrowRight' || k === 'MediaTrackNext') player?.nextTrack();
-      else if (k === 'ArrowLeft' || k === 'MediaTrackPrevious') player?.previousTrack();
+      else if (k === 'ArrowRight') seekBy(10000);     // hold to scrub; debounced into one seek
+      else if (k === 'ArrowLeft') seekBy(-10000);
+      else if (k === 'MediaTrackNext') player?.nextTrack();
+      else if (k === 'MediaTrackPrevious') player?.previousTrack();
       else if (k === 'ArrowUp') VIZ.cycle(1);        // D-pad up/down: the one control every
       else if (k === 'ArrowDown') VIZ.cycle(-1);     // Android TV remote has and we don't use
       else return;

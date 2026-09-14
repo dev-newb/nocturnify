@@ -19,8 +19,6 @@ import androidx.webkit.WebViewClientCompat
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import org.json.JSONObject
-import java.net.HttpURLConnection
-import java.net.URL
 
 /**
  * Thin native shell: one full-screen WebView serving the bundled web app from
@@ -93,13 +91,7 @@ class MainActivity : Activity() {
             WebViewCompat.addWebMessageListener(web, "AndroidBridge", setOf(ORIGIN)) { _, message, _, _, _ ->
                 try {
                     val o = JSONObject(message.data ?: "{}")
-                    when (o.optString("type", "state")) {
-                        // api.deezer.com sends no Access-Control-Allow-Origin, so the page can't
-                        // fetch it directly. Proxy it natively — no CORS, and no JSONP script
-                        // injection from a third party into our own origin.
-                        "bpm" -> fetchBpm(o.optString("id"), o.optString("isrc"))
-                        else -> PlaybackService.push(this, o.optBoolean("playing"), o.optString("title"), o.optString("artist"))
-                    }
+                    PlaybackService.push(this, o.optBoolean("playing"), o.optString("title"), o.optString("artist"))
                 } catch (e: Exception) { Log.w(TAG, "bridge parse: ${e.message}") }
             }
         }
@@ -108,25 +100,6 @@ class MainActivity : Activity() {
 
         val page = intent.getStringExtra("page") ?: "index.html"
         web.loadUrl("$ORIGIN/assets/$page")
-    }
-
-    /** Look up a track's tempo by ISRC on Deezer (public, no auth) and hand it back to the page. */
-    private fun fetchBpm(id: String, isrc: String) {
-        if (id.isEmpty() || isrc.isEmpty()) return
-        Thread {
-            var bpm = 0.0
-            try {
-                val c = (URL("https://api.deezer.com/2.0/track/isrc:$isrc").openConnection() as HttpURLConnection).apply {
-                    connectTimeout = 6000; readTimeout = 6000; requestMethod = "GET"
-                }
-                if (c.responseCode == 200) {
-                    bpm = JSONObject(c.inputStream.bufferedReader().use { it.readText() }).optDouble("bpm", 0.0)
-                }
-                c.disconnect()
-            } catch (e: Exception) { Log.w(TAG, "bpm lookup: ${e.message}") }
-            val safeId = id.replace("'", "")
-            runOnUiThread { web.evaluateJavascript("window.tvBpm && tvBpm('$safeId', $bpm)", null) }
-        }.start()
     }
 
     override fun onNewIntent(intent: android.content.Intent) {

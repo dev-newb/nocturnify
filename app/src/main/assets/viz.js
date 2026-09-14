@@ -15,12 +15,13 @@
   let cv, ctx, raf = 0, opts = null, running = false;
   let parts = [], sprites = [], curtains = [], pal = null, prevPal = null, palMix = 1;
   let artImg = null, artUrl = '', lastTrack = '';
-  let seed = 1, tPrev = 0, tNow = 0, mode = 0, modeUntil = 0;
+  let seed = 1, tPrev = 0, tNow = 0, mode = 0, modeUntil = 0, seekPreview = null;
 
   const rnd = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296);
   const hash = s => { let h = 2166136261; for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return h >>> 0; };
   const lerp = (a, b, m) => a + (b - a) * m;
   const rgb = c => `rgb(${c[0] | 0},${c[1] | 0},${c[2] | 0})`;
+  const mmss = ms => { const t = Math.max(0, Math.floor((ms || 0) / 1000)); return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}`; };
 
   try { mode = Math.max(0, Math.min(MODES.length - 1, parseInt(localStorage.viz_mode || '0', 10) || 0)); } catch (e) {}
 
@@ -187,7 +188,7 @@
     if (!tPrev) tPrev = ts;
     let dt = (ts - tPrev) / 1000; tPrev = ts;
     if (dt > 0.1) dt = 0.1;
-    const moving = (st.paused ? 0.22 : 1) * (st.rate || 1);   // rate: tempo-scaled, see app.js
+    const moving = st.paused ? 0.22 : 1;          // paused: keep drifting slowly, never freeze
     tNow += dt * moving;
 
     const id = st.uri || '';
@@ -215,15 +216,33 @@
     drawArt(W / 2, ART_CY, ART_SZ * (1 + Math.sin(tNow * 0.55) * 0.013));
     drawInfo(st);
 
+    // progress line + position marker; shows the seek target while scrubbing
+    const barX = W * 0.18, barW = W * 0.64, barY = H - 42;
+    const seeking = seekPreview != null;
+    const shown = seeking ? seekPreview : st.position;
+    const shownProg = st.duration ? Math.max(0, Math.min(1, shown / st.duration)) : 0;
+    const a1 = pal.acc[0] || [255, 255, 255];
     ctx.fillStyle = 'rgba(255,255,255,0.14)';
-    ctx.fillRect(W * 0.18, H - 42, W * 0.64, 3);
-    ctx.fillStyle = rgb(pal.acc[0] || [255, 255, 255]);
-    ctx.fillRect(W * 0.18, H - 42, W * 0.64 * prog, 3);
-    if (st.paused) {
+    ctx.fillRect(barX, barY, barW, 3);
+    ctx.fillStyle = rgb(a1);
+    ctx.fillRect(barX, barY, barW * shownProg, 3);
+    ctx.beginPath();
+    ctx.arc(barX + barW * shownProg, barY + 1.5, seeking ? 11 : 7, 0, Math.PI * 2);
+    ctx.fillStyle = seeking ? '#ffffff' : rgb(a1);
+    ctx.fill();
+    ctx.lineWidth = 2; ctx.strokeStyle = 'rgba(0,0,0,0.38)'; ctx.stroke();
+    ctx.font = '19px system-ui, sans-serif';
+    ctx.textAlign = 'left';
+    ctx.fillStyle = seeking ? 'rgba(255,255,255,0.95)' : 'rgba(255,255,255,0.50)';
+    ctx.fillText(mmss(shown), barX, barY - 16);
+    ctx.textAlign = 'right';
+    ctx.fillStyle = 'rgba(255,255,255,0.50)';
+    ctx.fillText(mmss(st.duration), barX + barW, barY - 16);
+    if (st.paused && !seeking) {
       ctx.textAlign = 'center';
       ctx.fillStyle = 'rgba(255,255,255,0.55)';
       ctx.font = '20px system-ui, sans-serif';
-      ctx.fillText('Paused', W / 2, H - 58);
+      ctx.fillText('Paused', W / 2, barY - 16);
     }
     // mode name, briefly, after a cycle
     if (tNow < modeUntil) {
@@ -268,5 +287,6 @@
       return MODES[mode];
     },
     modeName: () => MODES[mode],
+    setSeekPreview(ms) { seekPreview = ms; },
   };
 })();
