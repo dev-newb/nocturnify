@@ -71,6 +71,21 @@
     } catch (e) { /* bridge absent (e.g. older WebView) — background audio just won't engage */ }
   }
 
+  // Everything the visualiser is allowed to know: real position, real art, real identity.
+  const vizState = () => {
+    const s = lastState; if (!s) return {};
+    const t = s.track_window?.current_track;
+    return {
+      uri: t?.uri || '', title: t?.name || '',
+      artist: (t?.artists || []).map(a => a.name).join(', '),
+      artUrl: t?.album?.images?.[0]?.url || '',
+      position: s.paused ? s.position : Math.min(s.duration, s.position + (Date.now() - lastStateAt)),
+      duration: s.duration || 0, paused: !!s.paused,
+    };
+  };
+  function openViz() { screen = 'viz'; VIZ.start({ state: vizState }); }
+  function closeViz() { VIZ.stop(); screen = 'app'; }
+
   function markPlaying() {
     const uri = lastState?.track_window?.current_track?.uri;
     document.querySelectorAll('#main .item').forEach(i => i.classList.toggle('playing', !!uri && i.dataset.uri === uri));
@@ -159,6 +174,7 @@
   };
 
   async function go(v) {
+    if (v.name === 'viz') { openViz(); return; }     // overlay: leave the current view intact underneath
     view = v; if (!views[v.name]) return;
     main.innerHTML = '<div class="title">Loading…</div>';
     try { await views[v.name](v); } catch (e) { main.innerHTML = `<div class="title">Error</div><div class="empty">${esc(e.message)}</div>`; status(e.message); }
@@ -188,6 +204,13 @@
 
   document.addEventListener('keydown', e => {
     const k = e.key;
+    if (screen === 'viz') {
+      if (k === 'Enter' || k === 'MediaPlayPause' || e.keyCode === 13 || e.keyCode === 23) player?.togglePlay();
+      else if (k === 'ArrowRight' || k === 'MediaTrackNext') player?.nextTrack();
+      else if (k === 'ArrowLeft' || k === 'MediaTrackPrevious') player?.previousTrack();
+      else return;
+      VIZ.poke(); e.preventDefault(); return;
+    }
     if (screen === 'login') {
       if (k === 'Enter' || k === 'Spacebar' || e.keyCode === 13 || e.keyCode === 23) { AUTH.login(); e.preventDefault(); }
       return;
@@ -208,6 +231,7 @@
        87: () => player?.nextTrack(), 88: () => player?.previousTrack(), 86: () => player?.pause() })[code]?.();
   };
   window.onTvBack = () => {
+    if (screen === 'viz') { closeViz(); return true; }
     if (document.activeElement?.tagName === 'INPUT') { document.activeElement.blur(); return true; }
     if (view.name !== 'home') { go({ name: 'home' }); return true; }
     if (focus.zone === 'main') { focus.enter('side'); return true; }
