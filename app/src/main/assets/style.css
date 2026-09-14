@@ -11,10 +11,10 @@ h1 { font-size:44px; margin:0 0 24px } p, ol { color:var(--dim); font-size:24px 
 #login .hint { text-align:center; margin-top:28px; font-size:20px }
 button { font:inherit; color:inherit; background:var(--panel2); border:0; border-radius:40px; padding:16px 44px }
 
-#app { display:grid; grid-template-columns:300px 1fr; grid-template-rows:1fr 140px; height:100%; padding:4vh 6vw 0 4vw }
-#side { display:flex; flex-direction:column; gap:6px; padding-right:24px; border-right:1px solid #2a2a2a }
+#app { display:grid; grid-template-columns:300px 1fr; grid-template-rows:minmax(0,1fr) 140px; height:100%; padding:4vh 6vw 0 4vw }
+#side { display:flex; flex-direction:column; gap:6px; padding-right:24px; border-right:1px solid #2a2a2a; min-height:0; overflow:hidden }
 #side .spacer { flex:1 }
-#main { overflow:hidden; padding:0 24px 0 32px }
+#main { overflow:hidden; min-height:0; padding:0 24px 0 32px }
 #main .title { font-size:36px; font-weight:700; margin-bottom:16px; color:var(--fg) }
 #main .list { overflow:hidden }
 #main input { width:100%; font:inherit; font-size:30px; color:var(--fg); background:var(--panel2); border:0; border-radius:12px; padding:14px 20px; margin-bottom:16px; outline:none }
@@ -48,3 +48,6 @@ button { font:inherit; color:inherit; background:var(--panel2); border:0; border
 /* a flex child won't shrink below its content unless min-width is cleared — without this the
    text-overflow:ellipsis on .t/.s never fires and long names are clipped mid-word */
 .item > div { min-width:0 }
+
+/* '1fr' is minmax(auto,1fr): a grid row won't shrink under its content, so a taller sidebar
+   pushed the now-playing footer off-screen. minmax(0,1fr) + min-height:0 keeps it anchored. */

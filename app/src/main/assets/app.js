@@ -240,7 +240,10 @@
       const list = el('div', 'list');
       const r = await api('/me/player/recently-played?limit=50');
       const seen = new Set(), albums = [];
-      for (const it of (r.items || [])) {                 // dedupe albums, most recent play first
+      // Only count plays whose OWN context was an album. Every playlist track also carries an
+      // album, so without this filter the list fills with every album behind every playlist song.
+      for (const it of (r.items || [])) {
+        if (it?.context?.type !== 'album') continue;
         const al = it?.track?.album;
         if (al?.id && !seen.has(al.id)) { seen.add(al.id); albums.push(al); }
       }
@@ -253,7 +256,7 @@
         row.onactivate = () => { ctxName = al.name; go({ name: 'album', id: al.id, title: al.name, uri: al.uri }); };
         list.append(row);
       }
-      if (!albums.length) list.append(el('div', 'empty', 'Nothing played recently'));
+      if (!albums.length) list.append(el('div', 'empty', 'No albums played yet — albums you start directly (not playlist tracks) show up here'));
       setMain('Recent Albums', list); markPlaying();
     },
     async album({ id, title, uri }) {
