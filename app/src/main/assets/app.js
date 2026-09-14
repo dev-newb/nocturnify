@@ -72,7 +72,7 @@
     const row = el('div', 'item');
     row.dataset.uri = t.uri;
     row.append(el('span', 'n', String(i + 1)),
-      el('div', '', `<div class="t">${esc(t.name)}</div><div class="s">${esc(t.artists.map(a => a.name).join(', '))}</div>`));
+      el('div', '', `<div class="t">${esc(t.name)}</div><div class="s">${esc((t.artists || []).map(a => a.name).join(', '))}</div>`));
     row.onactivate = () => play(extra.context ? { context_uri: extra.context, offset: { position: i } } : { uris: extra.uris || [t.uri] });
     return row;
   }
@@ -81,14 +81,17 @@
     async home() {
       const list = el('div', 'list');
       const r = await api('/me/playlists?limit=50');
-      for (const p of r.items) {
+      const items = (r.items || []).filter(Boolean);
+      for (const p of items) {
         const row = el('div', 'item');
-        const img = el('img'); img.src = p.images?.[0]?.url || ''; row.append(img,
-          el('div', '', `<div class="t">${esc(p.name)}</div><div class="s">${p.tracks.total} tracks · ${esc(p.owner.display_name)}</div>`));
+        const img = el('img'); img.src = p.images?.[0]?.url || ''; row.append(img);
+        const count = p.items?.total ?? p.tracks?.total;
+        const meta = [count != null ? `${count} tracks` : null, p.owner?.display_name].filter(Boolean).join(' · ');
+        row.append(el('div', '', `<div class="t">${esc(p.name)}</div><div class="s">${esc(meta)}</div>`));
         row.onactivate = () => go({ name: 'playlist', id: p.id, title: p.name, uri: p.uri });
         list.append(row);
       }
-      if (!r.items.length) list.append(el('div', 'empty', 'No playlists'));
+      if (!items.length) list.append(el('div', 'empty', 'No playlists'));
       setMain('Playlists', list);
     },
     async playlist({ id, title, uri }) {
@@ -101,7 +104,7 @@
     async liked() {
       const list = el('div', 'list');
       const r = await api('/me/tracks?limit=50');
-      const tracks = r.items.map(x => x.track);
+      const tracks = (r.items || []).map(x => x.track).filter(t => t && t.uri);
       const uris = tracks.map(t => t.uri);
       tracks.forEach((t, i) => list.append(trackRow(t, i, { uris: uris.slice(i).concat(uris.slice(0, i)) })));
       setMain('Liked Songs', list); markPlaying();
@@ -157,7 +160,6 @@
   }
 
   document.addEventListener('keydown', e => {
-    console.log('[key]', JSON.stringify(e.key), e.keyCode);   // TEMP: confirm remote OK mapping
     const k = e.key;
     if (screen === 'login') {
       if (k === 'Enter' || k === 'Spacebar' || e.keyCode === 13 || e.keyCode === 23) { AUTH.login(); e.preventDefault(); }
