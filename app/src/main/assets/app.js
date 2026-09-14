@@ -4,6 +4,7 @@
   const el = (tag, cls, html) => { const e = document.createElement(tag); if (cls) e.className = cls; if (html != null) e.innerHTML = html; return e; };
   const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   const status = m => { $('#now-status').textContent = m; console.log('[status]', m); };
+  let screen = 'login';   // 'login' | 'app' — decides how the remote OK key is routed
 
   // ---------- Web API ----------
   async function api(path, opts = {}, retry = true) {
@@ -141,19 +142,32 @@
     move(d) { const n = this.items(this.zone).length; if (!n) return; this.idx[this.zone] = Math.max(0, Math.min(n - 1, this.idx[this.zone] + d)); this.apply(); },
     apply() {
       for (const z of ['side', 'main']) this.items(z).forEach((it, i) => it.classList.toggle('focused', z === this.zone && i === this.idx[z]));
-      const cur = this.current(); if (cur) cur.scrollIntoView({ block: 'nearest' });
+      const cur = this.current();
+      if (cur) { cur.tabIndex = -1; cur.focus({ preventScroll: true }); cur.scrollIntoView({ block: 'nearest' }); }
     },
     current() { return this.items(this.zone)[this.idx[this.zone]]; },
-    activate() { const c = this.current(); if (!c) return; if (c.dataset.nav) go({ name: c.dataset.nav }); else c.onactivate?.(); },
   };
 
+  // Activate whatever actually holds DOM focus — works for sidebar, list rows, and the login button alike.
+  function activateFocused() {
+    const a = document.activeElement;
+    const t = (a && (a.dataset.nav || a.onactivate)) ? a : focus.current();
+    if (!t) return;
+    if (t.dataset.nav) go({ name: t.dataset.nav }); else t.onactivate?.();
+  }
+
   document.addEventListener('keydown', e => {
-    if (document.activeElement?.tagName === 'INPUT') return;     // the TV keyboard owns the keys
+    console.log('[key]', JSON.stringify(e.key), e.keyCode);   // TEMP: confirm remote OK mapping
     const k = e.key;
+    if (screen === 'login') {
+      if (k === 'Enter' || k === 'Spacebar' || e.keyCode === 13 || e.keyCode === 23) { AUTH.login(); e.preventDefault(); }
+      return;
+    }
+    if (document.activeElement?.tagName === 'INPUT') return;     // the TV keyboard owns the keys
     if (k === 'ArrowUp') focus.move(-1); else if (k === 'ArrowDown') focus.move(1);
     else if (k === 'ArrowLeft') focus.enter('side'); else if (k === 'ArrowRight') focus.enter('main');
-    else if (k === 'Enter') focus.activate();
-    else if (k === 'MediaPlayPause' || k === ' ') player?.togglePlay();
+    else if (k === 'Enter' || k === 'Spacebar' || e.keyCode === 13 || e.keyCode === 23) activateFocused();
+    else if (k === 'MediaPlayPause') player?.togglePlay();
     else if (k === 'MediaTrackNext') player?.nextTrack(); else if (k === 'MediaTrackPrevious') player?.previousTrack();
     else return;
     e.preventDefault();
@@ -176,10 +190,11 @@
     if (!AUTH.configured()) { $('#setup-uri').textContent = AUTH.redirectUri; $('#setup').hidden = false; return; }
     if (!AUTH.signedIn()) {
       $('#login').hidden = false;
-      $('#login-btn').onclick = () => AUTH.login();
-      document.addEventListener('keydown', e => { if (e.key === 'Enter') AUTH.login(); }, { once: true });
+      screen = 'login';
+      $('#login-btn').onclick = () => AUTH.login();   // mouse/native activation
       return;
     }
+    screen = 'app';
     $('#app').hidden = false;
     status('Connecting player…');
     go({ name: 'home' });
