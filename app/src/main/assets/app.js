@@ -99,6 +99,17 @@
     };
   };
   function openViz() { screen = 'viz'; VIZ.start({ state: vizState }); }
+  // The SDK can strand playback at exactly end-of-track: is_playing stays true, position
+  // never moves, and it never rolls over. Nudge it along.
+  setInterval(() => {
+    const s = lastState;
+    if (!s || s.paused || !s.duration) return;
+    if (s.position >= s.duration - 400 && Date.now() - lastStateAt > 3000) {
+      status('Advancing (stalled at end)');
+      player?.nextTrack();
+    }
+  }, 1500);
+
   function resetIdle() {
     if (idleTimer) clearTimeout(idleTimer);
     idleTimer = setTimeout(() => {
@@ -114,15 +125,17 @@
     const st = vizState();
     if (!st.duration) return;
     const base = seekTarget != null ? seekTarget : st.position;
-    seekTarget = Math.max(0, Math.min(st.duration - 1500, base + deltaMs));
+    seekTarget = Math.max(0, Math.min(Math.max(0, st.duration - 5000), base + deltaMs));
     VIZ.setSeekPreview(seekTarget);
     clearTimeout(seekTimer);
     seekTimer = setTimeout(() => {
       const t = seekTarget; seekTarget = null;
       Promise.resolve(player?.seek(t)).catch(() => {});
-      setTimeout(() => VIZ.setSeekPreview(null), 500);
-    }, 320);
+      setTimeout(() => VIZ.setSeekPreview(null), 700);
+    }, 400);
   }
+  window.tvScrub = dir => seekBy(dir * 5000);
+  window.tvSeekTo = ms => { Promise.resolve(player?.seek(ms)).catch(() => {}); };
 
   function markPlaying() {
     const uri = lastState?.track_window?.current_track?.uri;
@@ -256,10 +269,8 @@
     const k = e.key;
     if (screen === 'viz') {
       if (k === 'Enter' || k === 'MediaPlayPause' || e.keyCode === 13 || e.keyCode === 23) player?.togglePlay();
-      else if (k === 'ArrowRight') seekBy(10000);     // hold to scrub; debounced into one seek
-      else if (k === 'ArrowLeft') seekBy(-10000);
-      else if (k === 'MediaTrackNext') player?.nextTrack();
-      else if (k === 'MediaTrackPrevious') player?.previousTrack();
+      else if (k === 'ArrowRight' || k === 'MediaTrackNext') player?.nextTrack();
+      else if (k === 'ArrowLeft' || k === 'MediaTrackPrevious') player?.previousTrack();
       else if (k === 'ArrowUp') VIZ.cycle(1);        // D-pad up/down: the one control every
       else if (k === 'ArrowDown') VIZ.cycle(-1);     // Android TV remote has and we don't use
       else return;
@@ -280,7 +291,10 @@
   });
 
   // Called from MainActivity for remote transport keys (Android keycodes) and Back.
-  window.onTvKey = code => {
+  window.onTvKey = (code, down = true) => {
+    if (!down) return;
+    if (code === 90) return seekBy(5000);
+    if (code === 89) return seekBy(-5000);
     ({ 85: () => player?.togglePlay(), 126: () => setPlaying(true), 127: () => setPlaying(false),
        87: () => player?.nextTrack(), 88: () => player?.previousTrack(), 86: () => setPlaying(false) })[code]?.();
   };

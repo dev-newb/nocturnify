@@ -15,7 +15,7 @@
   let cv, ctx, raf = 0, opts = null, running = false;
   let parts = [], sprites = [], curtains = [], pal = null, prevPal = null, palMix = 1;
   let artImg = null, artUrl = '', lastTrack = '';
-  let seed = 1, tPrev = 0, tNow = 0, mode = 0, modeUntil = 0, seekPreview = null;
+  let seed = 1, tPrev = 0, tNow = 0, mode = 0, modeUntil = 0, seekPreview = null, seekShown = null;
 
   const rnd = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296);
   const hash = s => { let h = 2166136261; for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return h >>> 0; };
@@ -219,7 +219,10 @@
     // progress line + position marker; shows the seek target while scrubbing
     const barX = W * 0.18, barW = W * 0.64, barY = H - 42;
     const seeking = seekPreview != null;
-    const shown = seeking ? seekPreview : st.position;
+    // ease toward the target so discrete presses glide rather than snapping in chunks
+    if (seeking) seekShown = seekShown == null ? st.position : seekShown + (seekPreview - seekShown) * Math.min(1, dt * 7);
+    else seekShown = null;
+    const shown = seeking ? seekShown : st.position;
     const shownProg = st.duration ? Math.max(0, Math.min(1, shown / st.duration)) : 0;
     const a1 = pal.acc[0] || [255, 255, 255];
     ctx.fillStyle = 'rgba(255,255,255,0.14)';

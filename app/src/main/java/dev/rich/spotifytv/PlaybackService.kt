@@ -52,7 +52,8 @@ class PlaybackService : android.app.Service() {
         s.setPlaybackState(PlaybackStateCompat.Builder()
             .setActions(PlaybackStateCompat.ACTION_PLAY or PlaybackStateCompat.ACTION_PAUSE or
                 PlaybackStateCompat.ACTION_PLAY_PAUSE or PlaybackStateCompat.ACTION_SKIP_TO_NEXT or
-                PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS)
+                PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS or PlaybackStateCompat.ACTION_FAST_FORWARD or
+                PlaybackStateCompat.ACTION_REWIND or PlaybackStateCompat.ACTION_SEEK_TO)
             .setState(if (playing) PlaybackStateCompat.STATE_PLAYING else PlaybackStateCompat.STATE_PAUSED,
                 PlaybackStateCompat.PLAYBACK_POSITION_UNKNOWN, 1f)
             .build())
@@ -115,6 +116,11 @@ class PlaybackService : android.app.Service() {
                     override fun onSkipToNext() { controlSink?.invoke("window.player && player.nextTrack()") }
                     override fun onSkipToPrevious() { controlSink?.invoke("window.player && player.previousTrack()") }
                     override fun onStop() { controlSink?.invoke("window.tvSetPlaying && tvSetPlaying(false)") }
+                    // The system delivers the remote's FF/RW here, not to Activity.onKeyDown —
+                    // but only if the actions above advertise them.
+                    override fun onFastForward() { controlSink?.invoke("window.tvScrub && tvScrub(1)") }
+                    override fun onRewind() { controlSink?.invoke("window.tvScrub && tvScrub(-1)") }
+                    override fun onSeekTo(pos: Long) { controlSink?.invoke("window.tvSeekTo && tvSeekTo($pos)") }
                 })
                 isActive = true
             }
