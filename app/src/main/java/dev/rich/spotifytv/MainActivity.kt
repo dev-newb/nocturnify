@@ -2,6 +2,7 @@ package dev.rich.spotifytv
 
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.net.Uri
 import android.os.Bundle
 import android.util.Log
 import android.view.KeyEvent
@@ -15,11 +16,18 @@ import android.webkit.WebSettings
 import android.webkit.WebView
 import androidx.webkit.WebViewAssetLoader
 import androidx.webkit.WebViewClientCompat
+import androidx.webkit.WebViewCompat
+import androidx.webkit.WebViewFeature
+import org.json.JSONObject
 
 /**
- * A thin native shell: one full-screen WebView that serves the bundled web app from
- * https://appassets.androidplatform.net/assets/ (a secure origin, which EME/Widevine requires).
- * Everything interesting lives in assets/.
+ * Thin native shell: one full-screen WebView serving the bundled web app from
+ * https://appassets.androidplatform.net/assets/ (a secure origin, required by EME/Widevine).
+ *
+ * Background audio: a MediaSession + foreground service (PlaybackService) keeps the process
+ * — and the WebView's audio — alive after the user leaves the app. The page pushes its play
+ * state here via a WebMessageListener scoped to our own origin; media buttons flow back the
+ * other way, from the session callback into player.* JS calls.
  */
 class MainActivity : Activity() {
 
@@ -29,6 +37,7 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        PlaybackService.ensureSession(this)
 
         val assets = WebViewAssetLoader.Builder()
             .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(this))
@@ -37,9 +46,9 @@ class MainActivity : Activity() {
         web = WebView(this).apply {
             settings.apply {
                 javaScriptEnabled = true
-                domStorageEnabled = true                  // localStorage for tokens
+                domStorageEnabled = true
                 mediaPlaybackRequiresUserGesture = false
-                userAgentString = DESKTOP_UA              // the Spotify SDK sniffs for a desktop browser
+                userAgentString = DESKTOP_UA
                 cacheMode = WebSettings.LOAD_DEFAULT
             }
             webViewClient = object : WebViewClientCompat() {
@@ -47,8 +56,6 @@ class MainActivity : Activity() {
                     assets.shouldInterceptRequest(request.url)
             }
             webChromeClient = object : WebChromeClient() {
-                // Widevine: Chromium asks the embedder for PROTECTED_MEDIA_ID. Without this grant,
-                // requestMediaKeySystemAccess rejects and DRM playback fails with no obvious error.
                 override fun onPermissionRequest(request: PermissionRequest) {
                     val drm = request.resources.filter { it == PermissionRequest.RESOURCE_PROTECTED_MEDIA_ID }
                     if (drm.isNotEmpty()) request.grant(drm.toTypedArray()) else request.deny()
@@ -61,7 +68,18 @@ class MainActivity : Activity() {
         }
         setContentView(web)
 
-        // `adb shell am start -n dev.rich.spotifytv/.MainActivity -e page eme-test.html` for diagnostics.
+        // Page -> native: playback state, ONLY from our own origin (never accounts.spotify.com).
+        if (WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) {
+            WebViewCompat.addWebMessageListener(web, "AndroidBridge", setOf(ORIGIN)) { _, message, _, _, _ ->
+                try {
+                    val o = JSONObject(message.data ?: "{}")
+                    PlaybackService.push(this, o.optBoolean("playing"), o.optString("title"), o.optString("artist"))
+                } catch (e: Exception) { Log.w(TAG, "bridge parse: ${e.message}") }
+            }
+        }
+        // Session (media buttons) -> page.
+        PlaybackService.controlSink = { js -> runOnUiThread { web.evaluateJavascript(js, null) } }
+
         val page = intent.getStringExtra("page") ?: "index.html"
         web.loadUrl("$ORIGIN/assets/$page")
     }
@@ -71,16 +89,18 @@ class MainActivity : Activity() {
         intent.getStringExtra("page")?.let { web.loadUrl("$ORIGIN/assets/$it") }
     }
 
+    // NB: deliberately no onPause/onStop override that pauses the WebView — audio must keep
+    // running in the background. The foreground service keeps the process alive; onStop is the
+    // resting state when the user presses Home.
+
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
         when (keyCode) {
-            // Give the page first refusal on Back; it returns true if it closed a view.
             KeyEvent.KEYCODE_BACK -> {
                 web.evaluateJavascript("typeof onTvBack==='function' && onTvBack()") { consumed ->
                     if (consumed != "true") { if (web.canGoBack()) web.goBack() else finish() }
                 }
                 return true
             }
-            // Remote transport keys don't always reach the page as DOM events; forward them explicitly.
             KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE, KeyEvent.KEYCODE_MEDIA_PLAY, KeyEvent.KEYCODE_MEDIA_PAUSE,
             KeyEvent.KEYCODE_MEDIA_NEXT, KeyEvent.KEYCODE_MEDIA_PREVIOUS, KeyEvent.KEYCODE_MEDIA_STOP -> {
                 web.evaluateJavascript("typeof onTvKey==='function' && onTvKey(${keyCode})", null)
@@ -91,6 +111,10 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
+        // Real teardown only (back-out / task swipe): stop audio and release.
+        PlaybackService.controlSink = null
+        PlaybackService.push(this, false, "", "")
+        stopService(android.content.Intent(this, PlaybackService::class.java))
         web.destroy()
         super.onDestroy()
     }

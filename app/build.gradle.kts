@@ -29,5 +29,6 @@ android {
 }
 
 dependencies {
-    implementation("androidx.webkit:webkit:1.12.1")   // WebViewAssetLoader -> https origin for EME
+    implementation("androidx.webkit:webkit:1.12.1")   // WebViewAssetLoader -> https origin for EME; scoped JS bridge
+    implementation("androidx.media:media:1.7.0")      // MediaSessionCompat + MediaStyle notification
 }

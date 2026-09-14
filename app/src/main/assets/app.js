@@ -5,6 +5,7 @@
   const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   const status = m => { $('#now-status').textContent = m; console.log('[status]', m); };
   let screen = 'login';   // 'login' | 'app' — decides how the remote OK key is routed
+  let userId = null;      // signed-in user's id, for owned-vs-followed playlist logic
 
   // ---------- Web API ----------
   async function api(path, opts = {}, retry = true) {
@@ -32,7 +33,7 @@
       catch (e) { status('transfer: ' + e.message); }
     });
     player.addListener('not_ready', () => { deviceId = null; status('Device offline'); });
-    player.addListener('player_state_changed', s => { lastState = s; lastStateAt = Date.now(); renderNow(); markPlaying(); });
+    player.addListener('player_state_changed', s => { lastState = s; lastStateAt = Date.now(); renderNow(); markPlaying(); pushNative(); });
     for (const ev of ['initialization_error', 'authentication_error', 'account_error', 'playback_error'])
       player.addListener(ev, ({ message }) => status(`${ev}: ${message}`));
     player.connect().then(ok => { if (!ok) status('SDK failed to connect'); });
@@ -58,6 +59,18 @@
     const pos = s.paused ? s.position : Math.min(s.duration, s.position + (Date.now() - lastStateAt));
     $('#now-fill').style.width = (100 * pos / s.duration).toFixed(2) + '%';
   }, 500);
+  // Mirror current play state to the native MediaSession + foreground service (background audio).
+  function pushNative() {
+    try {
+      const t = lastState?.track_window?.current_track;
+      window.AndroidBridge?.postMessage(JSON.stringify({
+        playing: lastState ? !lastState.paused : false,
+        title: t?.name || '',
+        artist: (t?.artists || []).map(a => a.name).join(', '),
+      }));
+    } catch (e) { /* bridge absent (e.g. older WebView) — background audio just won't engage */ }
+  }
+
   function markPlaying() {
     const uri = lastState?.track_window?.current_track?.uri;
     document.querySelectorAll('#main .item').forEach(i => i.classList.toggle('playing', !!uri && i.dataset.uri === uri));
@@ -80,6 +93,7 @@
   const views = {
     async home() {
       const list = el('div', 'list');
+      if (userId === null) { try { userId = (await api('/me')).id; } catch (e) {} }
       const r = await api('/me/playlists?limit=50');
       const items = (r.items || []).filter(Boolean);
       for (const p of items) {
@@ -88,11 +102,22 @@
         const count = p.items?.total ?? p.tracks?.total;
         const meta = [count != null ? `${count} track${count === 1 ? '' : 's'}` : null, p.owner?.display_name].filter(Boolean).join(' · ');
         row.append(el('div', '', `<div class="t">${esc(p.name)}</div><div class="s">${esc(meta)}</div>`));
-        row.onactivate = () => { play({ context_uri: p.uri }); status('Playing ' + p.name); };
+        row.onactivate = () => {
+          if (p.owner?.id && p.owner.id === userId) go({ name: 'playlist', id: p.id, title: p.name, uri: p.uri });
+          else { play({ context_uri: p.uri }); status('Playing ' + p.name); }   // followed: track list is 403, play whole
+        };
         list.append(row);
       }
       if (!items.length) list.append(el('div', 'empty', 'No playlists'));
       setMain('Playlists', list);
+    },
+    async playlist({ id, title, uri }) {
+      const list = el('div', 'list');
+      const r = await api(`/playlists/${id}/items?limit=100`);   // 200 for owned playlists; items[].item holds the track
+      (r.items || []).map(x => x.item).filter(t => t && t.uri)
+        .forEach((t, i) => list.append(trackRow(t, i, { context: uri })));
+      if (!list.children.length) list.append(el('div', 'empty', 'No tracks'));
+      setMain(title, list); markPlaying();
     },
     async liked() {
       const list = el('div', 'list');
