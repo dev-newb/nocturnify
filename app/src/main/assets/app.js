@@ -40,7 +40,7 @@
       catch (e) { status('transfer: ' + e.message); }
     });
     player.addListener('not_ready', () => { deviceId = null; status('Device offline'); });
-    player.addListener('player_state_changed', s => { lastState = s; lastStateAt = Date.now(); renderNow(); markPlaying(); pushNative(); syncShuffle(!!s?.shuffle, !!s?.disallows?.toggling_shuffle); });
+    player.addListener('player_state_changed', s => { lastState = s; lastStateAt = Date.now(); renderNow(); markPlaying(); pushNative(); noteAlbumPlay(s); syncShuffle(!!s?.shuffle, !!s?.disallows?.toggling_shuffle); });
     for (const ev of ['initialization_error', 'authentication_error', 'account_error', 'playback_error'])
       player.addListener(ev, ({ message }) => status(`${ev}: ${message}`));
     player.connect().then(ok => { if (!ok) status('SDK failed to connect'); });
@@ -187,6 +187,25 @@
   };
   window.tvSeekTo = ms => { Promise.resolve(player?.seek(ms)).catch(() => {}); };
 
+  // Spotify's history can't tell us intent — every playlist track drags its album along, and
+  // filtering to album-context plays leaves nothing until you happen to start one. So record
+  // album plays ourselves: whenever the playing CONTEXT is an album, that was a deliberate choice.
+  function noteAlbumPlay(s) {
+    const uri = s?.context?.uri || '';
+    if (!uri.startsWith('spotify:album:')) return;
+    const t = s?.track_window?.current_track;
+    const al = t?.album;
+    if (!al?.uri) return;
+    try {
+      const prev = JSON.parse(localStorage.recent_albums || '[]').filter(x => x.uri !== al.uri);
+      prev.unshift({
+        uri: al.uri, id: al.uri.split(':').pop(), name: al.name,
+        images: al.images || [], artist: (t.artists || []).map(a => a.name).join(', '), ts: Date.now(),
+      });
+      localStorage.recent_albums = JSON.stringify(prev.slice(0, 40));
+    } catch (e) { /* storage unavailable — the API half still works */ }
+  }
+
   function markPlaying() {
     const uri = lastState?.track_window?.current_track?.uri;
     document.querySelectorAll('#main .item').forEach(i => i.classList.toggle('playing', !!uri && i.dataset.uri === uri));
@@ -238,25 +257,35 @@
     async recent() {
       ctxName = 'Recent Albums';
       const list = el('div', 'list');
-      const r = await api('/me/player/recently-played?limit=50');
+      const entries = [];
+      try {                                             // albums started in this app
+        for (const a of JSON.parse(localStorage.recent_albums || '[]')) entries.push({ al: a, ts: a.ts || 0 });
+      } catch (e) {}
+      try {                                             // album plays from other devices
+        const r = await api('/me/player/recently-played?limit=50');
+        for (const it of (r?.items || [])) {
+          if (it?.context?.type !== 'album') continue;  // playlist tracks drag their album along
+          const al = it?.track?.album;
+          if (al?.id) entries.push({ al, ts: Date.parse(it.played_at || '') || 0 });
+        }
+      } catch (e) { status(e.message); }
+      entries.sort((a, b) => b.ts - a.ts);
       const seen = new Set(), albums = [];
-      // Only count plays whose OWN context was an album. Every playlist track also carries an
-      // album, so without this filter the list fills with every album behind every playlist song.
-      for (const it of (r.items || [])) {
-        if (it?.context?.type !== 'album') continue;
-        const al = it?.track?.album;
-        if (al?.id && !seen.has(al.id)) { seen.add(al.id); albums.push(al); }
+      for (const { al } of entries) {
+        const id = al.id || (al.uri || '').split(':').pop();
+        if (id && !seen.has(id)) { seen.add(id); albums.push({ ...al, id }); }
       }
       for (const al of albums) {
         const row = el('div', 'item');
         const img = el('img'); img.src = al.images?.[2]?.url || al.images?.[0]?.url || '';
+        const who = al.artist || (al.artists || []).map(x => x.name).join(', ');
         const bits = [al.total_tracks ? `${al.total_tracks} track${al.total_tracks === 1 ? '' : 's'}` : null,
-                      (al.artists || []).map(x => x.name).join(', ')].filter(Boolean).join(' · ');
+                      who].filter(Boolean).join(' · ');
         row.append(img, el('div', '', `<div class="t">${esc(al.name)}</div><div class="s">${esc(bits)}</div>`));
         row.onactivate = () => { ctxName = al.name; go({ name: 'album', id: al.id, title: al.name, uri: al.uri }); };
         list.append(row);
       }
-      if (!albums.length) list.append(el('div', 'empty', 'No albums played yet — albums you start directly (not playlist tracks) show up here'));
+      if (!albums.length) list.append(el('div', 'empty', 'No albums yet — start an album (try Search) and it lands here'));
       setMain('Recent Albums', list); markPlaying();
     },
     async album({ id, title, uri }) {
