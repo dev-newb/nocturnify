@@ -495,16 +495,46 @@
     ctx.stroke();
   }
 
+  // Canvas text neither wraps nor clips, so a long title runs straight off both edges.
+  // Keep every line inside a centred safe box; the title may use two lines, the rest one.
+  function ellipsize(s, maxw) {
+    if (ctx.measureText(s).width <= maxw) return s;
+    let lo = 0, hi = s.length;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (ctx.measureText(s.slice(0, mid) + '\u2026').width <= maxw) lo = mid; else hi = mid - 1;
+    }
+    return s.slice(0, lo).trimEnd() + '\u2026';
+  }
+
+  function wrap2(s, maxw) {
+    if (ctx.measureText(s).width <= maxw) return [s];
+    const w = s.split(' ');
+    let head = '', i = 0;
+    for (; i < w.length; i++) {
+      const next = head ? head + ' ' + w[i] : w[i];
+      if (ctx.measureText(next).width > maxw) break;
+      head = next;
+    }
+    if (!head) return [ellipsize(s, maxw)];            // a single unbreakable word
+    const rest = w.slice(i).join(' ');
+    return rest ? [head, ellipsize(rest, maxw)] : [head];
+  }
+
   function drawInfo(st) {
     ctx.textAlign = 'center';
+    const maxw = W * 0.76;                              // leaves ~12% each side, clear of overscan
     let y = ART_CY + ART_SZ / 2 + 58;
     ctx.fillStyle = '#fff';
-    ctx.font = '600 40px system-ui, sans-serif';
-    ctx.fillText(st.title || '', W / 2, y);
-    y += 40;
+    ctx.font = '600 40px system-ui, sans-serif';        // set before measuring: measureText uses it
+    for (const line of wrap2(st.title || '', maxw)) {
+      ctx.fillText(line, W / 2, y);
+      y += 46;
+    }
+    y -= 6;                                             // lines advance 46; artist sits 40 below the last
     ctx.fillStyle = 'rgba(255,255,255,0.74)';
     ctx.font = '27px system-ui, sans-serif';
-    ctx.fillText(st.artist || '', W / 2, y);
+    ctx.fillText(ellipsize(st.artist || '', maxw), W / 2, y);
     // Singles often name the album after the track, and playing an album sets the context to
     // the album name — so both lines can echo something already on screen. Show each only once.
     const norm = x => (x || '').trim().toLowerCase();
@@ -514,14 +544,14 @@
       y += 33;
       ctx.fillStyle = 'rgba(255,255,255,0.46)';
       ctx.font = '22px system-ui, sans-serif';
-      ctx.fillText(st.album, W / 2, y);
+      ctx.fillText(ellipsize(st.album, maxw), W / 2, y);
     }
     if (showCtx) {
       y += 30;
       const a = pal.acc[0] || [180, 200, 230];
       ctx.fillStyle = `rgba(${a[0] | 0},${a[1] | 0},${a[2] | 0},0.72)`;
       ctx.font = '20px system-ui, sans-serif';
-      ctx.fillText(st.context, W / 2, y);
+      ctx.fillText(ellipsize(st.context, maxw), W / 2, y);
     }
   }
 
