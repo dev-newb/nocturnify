@@ -58,3 +58,13 @@ updated hundreds of times a minute.
   rebuild — all serially inside Chromium. Measured across ten transitions, the DRM and licence
   stages are stable at 510–681 ms; the variance is entirely in Chromium's post-licence buffering,
   which ranged 8–613 ms. Nothing in this app can reach any of it.
+
+  The audible ones are **cold transitions**. A forced skip (nothing prefetched) waits 450–570 ms
+  after the licence, and the two audible natural transitions waited 517 and 613 ms, against
+  8–280 ms for inaudible ones. So an audible gap is a track change where the SDK hadn't
+  pre-loaded the next track, and its first audio had to be fetched fresh.
+
+  Ruled out by measurement: the visualizer (an A/B of 7 skips each showed no difference; its
+  per-track work is 21 ms, and a long-task observer saw no main-thread stall over 50 ms), the
+  network (5 GHz, 780 Mbps link, working IPv6, 52–65 ms to Spotify's API and audio CDN), and
+  device memory. When the SDK prefetches is not exposed.

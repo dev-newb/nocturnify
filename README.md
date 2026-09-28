@@ -17,7 +17,7 @@ so a phone works as a remote.
 | | |
 |---|---|
 | [Architecture](docs/architecture.md) | why a WebView, the secure origin, PKCE, background audio, platform limits |
-| [Visualizer](docs/visualizer.md) | all ten modes, the palette quantiser, performance findings |
+| [Visualizer](docs/visualizer.md) | all 13 modes plus Auto, the palette quantiser, performance findings |
 | [Footprint](docs/footprint.md) | measured disk and memory, against the official app |
 | [Troubleshooting](docs/troubleshooting.md) | Widevine gate, sign-in, shuffle, overscan |
 
@@ -48,8 +48,8 @@ adb -s <tv-ip>:5555 install -r app/build/outputs/apk/debug/app-debug.apk
 
 | Key | Action |
 |---|---|
-| ▲ ▼ | move within the list |
-| ◀ ▶ | switch between sidebar and list; change mode inside the visualizer |
+| ▲ ▼ | move within the list; **change mode** inside the visualizer |
+| ◀ ▶ | switch between sidebar and list; **previous / next track** inside the visualizer |
 | OK | open / play; play-pause inside the visualizer |
 | Back | up a level; at the top, exit |
 | Play/Pause | transport |
@@ -57,9 +57,10 @@ adb -s <tv-ip>:5555 install -r app/build/outputs/apk/debug/app-debug.apk
 
 ## Visualizer
 
-Ten modes — Drift, Orbit, Aurora, Nebula, Starfield, Ribbons, Lattice, Bloom, Rain, and a
-hidden **Auto** that cross-fades through all nine. Colours are quantised from the current
-album art. Every mode holds 0.00% jank at ~8 ms a frame on a 2019 MediaTek TV SoC.
+Thirteen modes — Drift, Orbit, Aurora, Nebula, Starfield, Ribbons, Lattice, Bloom, Rain,
+Kaleido, Murmur, Golden and Harmonograph — plus a hidden **Auto** that cross-fades through
+them all. Colours are quantised from the current album art. Every mode holds 60 fps at
+~8 ms a frame on a 2019 MediaTek TV SoC.
 
 Details and the performance work in [docs/visualizer.md](docs/visualizer.md).
 

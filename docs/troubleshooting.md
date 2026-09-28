@@ -37,9 +37,17 @@ locked.
 
 ## A short gap between tracks
 
-Expected, and not fixable from here. Every track change costs ~0.7 s (occasionally ~1.2 s)
-because each track gets its own Widevine session and Chromium rebuilds the entire audio
-pipeline serially. See [architecture.md](architecture.md#known-platform-limits).
+Expected, and not fixable from here. Every track change costs ~0.7 s because each track gets
+its own Widevine session and Chromium rebuilds the entire audio pipeline serially. The ones you
+actually hear (~1.2 s) are changes where the SDK hadn't pre-loaded the next track. The
+visualizer, network and memory have all been measured and ruled out. See
+[architecture.md](architecture.md#known-platform-limits).
+
+## Play fails with "404 … Device not found"
+
+After hours of uptime Spotify can drop the player's device registration without telling the
+SDK. The app now recovers on its own: it re-registers the player and retries the play once, and
+the status line shows *Reconnecting…* while it does. If it persists, restart the app.
 
 ## UI clipped at the screen edge
 
