@@ -17,7 +17,12 @@
       ...opts, headers: { Authorization: 'Bearer ' + await AUTH.token(), 'Content-Type': 'application/json', ...(opts.headers || {}) },
     });
     if (r.status === 401 && retry) { await AUTH.refresh(); return api(path, opts, false); }
-    if (!r.ok) throw new Error(`${r.status} ${path}: ${(await r.text()).slice(0, 200)}`);
+    if (!r.ok) {
+      const body = await r.text();
+      let msg = body.slice(0, 200);
+      try { msg = JSON.parse(body).error?.message || msg; } catch {}
+      throw new Error(`${r.status} ${path.split('?')[0]}: ${msg}`);
+    }
     // Some endpoints answer with no body, and some (e.g. PUT /me/player/shuffle) answer 200
     // with a non-JSON payload. Neither should throw — callers that need data check for it.
     const txt = await r.text();
@@ -38,8 +43,13 @@
       deviceId = device_id; status('Ready · ' + CONFIG.deviceName);
       try { await api('/me/player', { method: 'PUT', body: JSON.stringify({ device_ids: [deviceId], play: false }) }); }
       catch (e) { status('transfer: ' + e.message); }
+      // resolve only after the transfer: its play:false must not land after a retried play
+      readyWaiters.splice(0).forEach(w => w(device_id));
     });
-    player.addListener('not_ready', () => { deviceId = null; status('Device offline'); });
+    player.addListener('not_ready', () => {
+      deviceId = null;
+      if (!reconnecting) { status('Device offline — reconnecting'); reconnect(); }
+    });
     player.addListener('player_state_changed', s => { lastState = s; lastStateAt = Date.now(); renderNow(); markPlaying(); pushNative(); syncShuffle(!!s?.shuffle, !!s?.disallows?.toggling_shuffle); });
     for (const ev of ['initialization_error', 'authentication_error', 'account_error', 'playback_error'])
       player.addListener(ev, ({ message }) => status(`${ev}: ${message}`));
@@ -56,10 +66,36 @@
   }
   window.tvSetPlaying = setPlaying;   // also called by the MediaSession (notification / remote)
 
+  // Spotify can drop the SDK's device registration (idle hours, TV standby, a network blip)
+  // without 'not_ready' ever firing — every play then 404s "Device not found" against a dead
+  // id until the app restarts. Re-registering yields a fresh id; play() does it on demand.
+  let readyWaiters = [], reconnecting = null;
+  function reconnect() {
+    if (reconnecting) return reconnecting;
+    status('Reconnecting…');
+    deviceId = null;
+    // Set the guard before disconnect(): if the SDK emits not_ready synchronously, the handler
+    // must see a reconnect already in flight rather than start a second one.
+    let done;
+    const p = reconnecting = new Promise(resolve => { done = id => { clearTimeout(timer); resolve(id); }; });
+    const timer = setTimeout(() => { readyWaiters = readyWaiters.filter(w => w !== done); done(null); }, 15000);
+    readyWaiters.push(done);
+    p.finally(() => { if (reconnecting === p) reconnecting = null; });
+    player.disconnect();
+    player.connect().then(ok => { if (!ok) done(null); });
+    return p;
+  }
+
   async function play(body) {
-    if (!deviceId) { status('Player not ready yet'); return; }
-    try { await api(`/me/player/play?device_id=${deviceId}`, { method: 'PUT', body: JSON.stringify(body) }); }
-    catch (e) { status('play: ' + e.message); }
+    if (!deviceId && !(player && await reconnect())) { status('Player offline — try again in a moment'); return; }
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try { await api(`/me/player/play?device_id=${deviceId}`, { method: 'PUT', body: JSON.stringify(body) }); return; }
+      catch (e) {
+        const stale = e.message.startsWith('404 ') && e.message.includes('Device not found');
+        if (attempt === 0 && stale && await reconnect()) continue;
+        status('play: ' + e.message); return;
+      }
+    }
   }
 
   // ---------- Now playing ----------
