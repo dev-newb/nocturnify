@@ -7,7 +7,11 @@
   let screen = 'login';   // 'login' | 'app' — decides how the remote OK key is routed
   let userId = null;      // signed-in user's id, for owned-vs-followed playlist logic
   let lastSearch = null;   // {q, tracks, albums} — so returning to Search keeps results
-  let ctxName = '';       // what's playing (playlist / Liked Songs / search), shown in the visualiser
+  let ctxName = '';       // the view being browsed (playlist / album / Liked Songs / Search)
+  // What was actually started from this TV, and from where. Captured at play time, because
+  // ctxName follows browsing: opening another album mid-song must not relabel what's playing.
+  let playCtx = { key: null, uris: null, name: '' };
+  let lastCtxLogged;
   let idleTimer = null;
   let logoutArmed = false;
 
@@ -89,7 +93,11 @@
   async function play(body) {
     if (!deviceId && !(player && await reconnect())) { status('Player offline — try again in a moment'); return; }
     for (let attempt = 0; attempt < 2; attempt++) {
-      try { await api(`/me/player/play?device_id=${deviceId}`, { method: 'PUT', body: JSON.stringify(body) }); return; }
+      try {
+        await api(`/me/player/play?device_id=${deviceId}`, { method: 'PUT', body: JSON.stringify(body) });
+        playCtx = { key: ctxKey(body.context_uri), uris: body.uris ? new Set(body.uris) : null, name: ctxName };
+        return;
+      }
       catch (e) {
         const stale = e.message.startsWith('404 ') && e.message.includes('Device not found');
         if (attempt === 0 && stale && await reconnect()) continue;
@@ -135,6 +143,28 @@
     } catch (e) { /* bridge absent (e.g. older WebView) — background audio just won't engage */ }
   }
 
+  // Compare contexts by their last two segments, so spotify:playlist:ID and the legacy
+  // spotify:user:NAME:playlist:ID are the same thing.
+  const ctxKey = u => (u ? u.split(':').slice(-2).join(':') : null);
+
+  // The line under the track names says where it's playing FROM. It follows what's actually
+  // playing and drops out when Spotify moves on by itself — autoplay after an album or playlist
+  // ends, a radio, or playback started from another device — rather than naming the old source.
+  function contextLabel(s, t) {
+    const key = ctxKey(s.context?.uri);
+    if (key !== lastCtxLogged) { lastCtxLogged = key; console.log('[ctx]', s.context?.uri || '(none)', JSON.stringify(s.context?.metadata || {}).slice(0, 160)); }
+    // Measured on the TV: after an album ends, Spotify KEEPS it as the context — description
+    // included — while autoplay plays other records. A track that isn't on the context's album
+    // means the label is stale. (Skipped for relinked tracks, whose regional version can sit on
+    // a different release. Playlists get no such check: their track lists are partial or 403.)
+    if (key && key.startsWith('album:') && t?.album?.uri && !t.linked_from?.uri && ctxKey(t.album.uri) !== key) return '';
+    const d = s.context?.metadata?.context_description;
+    if (d) return d;
+    if (playCtx.key) return key === playCtx.key ? playCtx.name : '';
+    const ids = [t?.uri, t?.linked_from?.uri];   // relinked tracks report a different uri
+    return playCtx.uris && ids.some(u => u && playCtx.uris.has(u)) ? playCtx.name : '';
+  }
+
   // Everything the visualiser is allowed to know: real position, real art, real identity.
   const vizState = () => {
     const s = lastState; if (!s) return {};
@@ -143,7 +173,7 @@
       uri: t?.uri || '', title: t?.name || '',
       artist: (t?.artists || []).map(a => a.name).join(', '),
       album: t?.album?.name || '',
-      context: s.context?.metadata?.context_description || ctxName || '',
+      context: contextLabel(s, t),
       artUrl: t?.album?.images?.[0]?.url || '',
       position: s.paused ? s.position : Math.min(s.duration, s.position + (Date.now() - lastStateAt)),
       duration: s.duration || 0, paused: !!s.paused,
