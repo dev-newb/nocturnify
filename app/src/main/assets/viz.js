@@ -1,4 +1,4 @@
-// viz.js — ambient now-playing visualiser (3 modes, D-pad UP/DOWN to cycle).
+// viz.js — ambient now-playing visualiser (13 modes plus a hidden Auto; ◀ ▶ to cycle).
 //
 // Deliberately NOT audio-reactive, because it cannot be: probing the running app showed the
 // Web Playback SDK exposes ZERO media elements to the DOM, so Web Audio has nothing to tap,
@@ -10,14 +10,18 @@
   const W = 1280, H = 720;
   const NPART = 210;
   const FPS = 60;             // load reduction didn't correlate with the audio gaps — restored
-  const MODES = ['Drift', 'Orbit', 'Aurora', 'Nebula', 'Starfield', 'Ribbons', 'Lattice', 'Bloom', 'Rain'];
+  const MODES = ['Drift', 'Orbit', 'Aurora', 'Nebula', 'Starfield', 'Ribbons', 'Lattice', 'Bloom', 'Rain',
+                 'Kaleido', 'Murmur', 'Golden', 'Harmonograph'];
+  const KAL = 9, MUR = 10, GOL = 11, HAR = 12;
   const AUTO = MODES.length;            // hidden slot: sits between the last and first
-  const TRAIL = [0.135, 0.135, 0.09, 0.055, 0.13, 0.10, 0.22, 0.10, 0.20];   // per-mode trail persistence
+  // per-mode trail persistence. Harmonograph is 1: its persistence lives in its own paper
+  // canvas, and a trail on top would multiply the ink's brightness by 1/trail.
+  const TRAIL = [0.135, 0.135, 0.09, 0.055, 0.13, 0.10, 0.22, 0.10, 0.20, 0.30, 0.26, 0.16, 1.0];
   const HOLD = 22, FADE = 5;            // Auto: seconds held, seconds cross-fading
   const ART_CY = H * 0.355, ART_SZ = 268;
 
   let cv, ctx, raf = 0, opts = null, running = false;
-  let poolA = [], poolB = [], sprites = [], curtains = [], rings = [], sharps = [], glow = null, pal = null, prevPal = null, palMix = 1;
+  let poolA = [], poolB = [], sprites = [], curtains = [], rings = [], sharps = [], lits = [], glow = null, pal = null, prevPal = null, palMix = 1;
   let autoIdx = 0, autoT = 0, autoNextReady = -1;
   // accents from a near-black cover are almost invisible as thin strokes; lift them a little
   const lift = (c, m = 0.38) => [c[0] + (255 - c[0]) * m, c[1] + (255 - c[1]) * m, c[2] + (255 - c[2]) * m];
@@ -31,7 +35,12 @@
   const rgb = c => `rgb(${c[0] | 0},${c[1] | 0},${c[2] | 0})`;
   const mmss = ms => { const t = Math.max(0, Math.floor((ms || 0) / 1000)); return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}`; };
 
-  try { mode = Math.max(0, Math.min(AUTO, parseInt(localStorage.viz_mode || '0', 10) || 0)); } catch (e) {}
+  try {
+    const v = localStorage.viz_mode || '';
+    const byName = v === 'Auto' ? AUTO : MODES.indexOf(v);
+    const legacy = parseInt(v, 10);          // older builds stored an index, and Auto was 9
+    mode = byName >= 0 ? byName : (legacy === 9 ? AUTO : (legacy >= 0 && legacy < 9 ? legacy : 0));
+  } catch (e) {}
 
   // ---- palette straight out of the cover art -------------------------------
   async function palette(url) {
@@ -43,8 +52,10 @@
     g.drawImage(img, 0, 0, 32, 32);
     const d = g.getImageData(0, 0, 32, 32).data;
     const buckets = new Map();
+    let lumSum = 0;
     for (let i = 0; i < d.length; i += 4) {
       const r = d[i], gg = d[i + 1], b = d[i + 2];
+      lumSum += 0.299 * r + 0.587 * gg + 0.114 * b;
       const key = ((r >> 4) << 8) | ((gg >> 4) << 4) | (b >> 4);
       const e = buckets.get(key) || { r: 0, g: 0, b: 0, n: 0 };
       e.r += r; e.g += gg; e.b += b; e.n++; buckets.set(key, e);
@@ -59,7 +70,7 @@
     const vivid = cols.filter(c2 => c2.sat > 0.22 && c2.lum > 0.14).slice(0, 4);
     const acc = (vivid.length ? vivid : cols.slice(0, 3)).map(c2 => [c2.r, c2.g, c2.b]);
     const dark = cols.slice().sort((a, b) => a.lum - b.lum)[0] || { r: 10, g: 10, b: 16 };
-    return { bg: [dark.r * 0.30 + 4, dark.g * 0.30 + 4, dark.b * 0.34 + 7], acc, img };
+    return { bg: [dark.r * 0.30 + 4, dark.g * 0.30 + 4, dark.b * 0.34 + 7], acc, img, lum: lumSum / (d.length / 4) / 255 };
   }
 
   function buildSprites(p) {
@@ -87,6 +98,20 @@
     }
     // A crisp point: bright opaque core with a fast falloff, for the sharp quarter of stars
     sharps = p.acc.map(c => {
+      const s = document.createElement('canvas'); s.width = s.height = 32;
+      const g = s.getContext('2d');
+      const col = `${c[0] | 0},${c[1] | 0},${c[2] | 0}`;
+      const rg = g.createRadialGradient(16, 16, 0, 16, 16, 16);
+      rg.addColorStop(0.00, `rgba(${col},1)`);
+      rg.addColorStop(0.34, `rgba(${col},0.92)`);
+      rg.addColorStop(0.52, `rgba(${col},0.22)`);
+      rg.addColorStop(1.00, `rgba(${col},0)`);
+      g.fillStyle = rg; g.fillRect(0, 0, 32, 32);
+      return s;
+    });
+    // The same crisp point, lifted toward white: thin marks (birds, ink) vanish in a dark accent
+    lits = p.acc.map(c0 => {
+      const c = lift(c0, 0.45);
       const s = document.createElement('canvas'); s.width = s.height = 32;
       const g = s.getContext('2d');
       const col = `${c[0] | 0},${c[1] | 0},${c[2] | 0}`;
@@ -160,7 +185,16 @@
       p.br0 = p.br; p.esc = 0;
       p.escK = 0.25 + rnd() * rnd() * 15.75;   // escape swell: mostly slight, occasionally huge
       p.stroked = rnd() < 0.25;                // a quarter of stars draw as stroked segments
+      // Murmur: a fixed spot on the flock's sheet (roughly gaussian), sub-flock, lag, brightness
+      p.mu = (rnd() + rnd() + rnd() - 1.5) * 2 * 150;
+      p.mw = (rnd() + rnd() + rnd() - 1.5) * 2 * 48;
+      p.mg = rnd() < 0.38; p.mr = 0.05 + rnd() * 0.2; p.mb = 0.6 + rnd() * 0.8; p.ms = rnd() * 2.2;
+      p.mx = null; p.my = null;
     }
+    if (id === KAL) { kalN = [8, 10, 12][(rnd() * 3) | 0]; kalPh = rnd() * 6.283; kalDir = rnd() < 0.5 ? -1 : 1; }
+    if (id === MUR) { murPh = rnd() * 6.283; murDir = rnd() < 0.5 ? -1 : 1; }
+    if (id === GOL) { golPh = rnd() * 6.283; golDir = rnd() < 0.5 ? -1 : 1; golFam = [13, 21, 34][(rnd() * 3) | 0]; }
+    if (id === HAR) { if (px) px.clearRect(0, 0, W, H); newSwing(); }
   }
 
   function field(x, y, t, k) {
@@ -468,6 +502,205 @@
     ctx.globalAlpha = 1;
   }
 
+  // ---- Kaleido -------------------------------------------------------------------------------
+  // The cover art itself, cut into a wedge and mirrored into a mandala that radiates from behind
+  // the art. One clip and one drawImage build the wedge off-screen each frame; the n-fold figure
+  // is then n blits of it with a rotation, every other one mirrored so the seams line up.
+  let kal = null, kx = null, kalScrim = null, kalN = 10, kalPh = 0, kalDir = 1;
+  const KAL_R = 820;                                  // reaches the far corner from the art centre
+  function mKaleido(pool, w) {
+    if (!artImg) return;
+    if (!kal) { kal = document.createElement('canvas'); kal.width = KAL_R; kal.height = 640; kx = kal.getContext('2d'); }
+    const half = Math.PI / kalN, kc = kal.height / 2;
+    const kh = Math.min(kal.height, Math.ceil(2 * KAL_R * Math.sin(half)) + 4);
+    kx.setTransform(1, 0, 0, 1, 0, 0);
+    kx.clearRect(0, 0, KAL_R, kal.height);
+    kx.save();
+    kx.beginPath(); kx.moveTo(0, kc); kx.arc(0, kc, KAL_R, -half, half); kx.closePath(); kx.clip();
+    // a magnified copy of the art turns (and drifts slightly) under the wedge, so the figure keeps
+    // re-forming — like turning the tube of a real kaleidoscope
+    const S = 1150;
+    kx.translate(KAL_R / 2 + Math.sin(tNow * 0.071 + kalPh) * 40,
+                 kc + Math.sin(tNow * 0.053 + kalPh * 1.7) * 40);
+    kx.rotate(tNow * 0.045 + kalPh);
+    kx.drawImage(artImg, -S / 2, -S / 2, S, S);
+    kx.restore();
+
+    const cx = W / 2, cy = ART_CY, spin = tNow * 0.028 * kalDir;
+    ctx.globalCompositeOperation = 'source-over';
+    const lum = prevPal && palMix < 1 ? lerp(prevPal.lum ?? 0.35, pal.lum ?? 0.35, palMix) : (pal.lum ?? 0.35);
+    ctx.globalAlpha = 0.19 * Math.max(0.6, Math.min(1.6, 0.35 / Math.max(0.05, lum))) * w;
+    for (let i = 0; i < kalN; i++) {
+      const a = spin + i * 2 * half, m = (i & 1) ? -1 : 1;
+      const c = Math.cos(a), sn = Math.sin(a);
+      ctx.setTransform(c, sn, -m * sn, m * c, cx, cy);
+      ctx.drawImage(kal, 0, kc - kh / 2, KAL_R, kh, 0, -kh / 2, KAL_R, kh);   // the wedge's strip only
+    }
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    if (!kalScrim) {
+      kalScrim = document.createElement('canvas'); kalScrim.width = kalScrim.height = 256;
+      const g = kalScrim.getContext('2d'), rg = g.createRadialGradient(128, 128, 0, 128, 128, 128);
+      rg.addColorStop(0, 'rgba(0,0,0,0.78)'); rg.addColorStop(0.55, 'rgba(0,0,0,0.5)'); rg.addColorStop(1, 'rgba(0,0,0,0)');
+      g.fillStyle = rg; g.fillRect(0, 0, 256, 256);
+    }
+    const ty = ART_CY + ART_SZ / 2 + 110;               // centre of the title/artist/album block
+    ctx.globalAlpha = w;
+    ctx.drawImage(kalScrim, W / 2 - 520, ty - 150, 1040, 300);
+    ctx.globalAlpha = 1;
+  }
+
+  // ---- Murmur --------------------------------------------------------------------------------
+  // A starling murmuration without flocking maths (O(n^2) is too much for this CPU). Each bird is
+  // a fixed spot on a sheet that is tumbled in 3-D and projected: face-on the flock is a thin
+  // veil, edge-on it collapses into a dense bright blade — that density swing IS the look.
+  // Waves travel along the sheet, and every bird chases its target with its own lag, so ripples
+  // pass THROUGH the flock instead of the whole thing moving rigidly.
+  let murPh = 0, murDir = 1;
+  function mMurmur(pool, w, dt) {
+    const ns = Math.max(1, lits.length), t = tNow;
+    const orbit = t * 0.05 * murDir + murPh;            // a slow circuit around the cover
+    const cx = W / 2 + Math.cos(orbit) * W * 0.31 + Math.sin(t * 0.143) * W * 0.04;
+    const cy = ART_CY + 50 + Math.sin(orbit) * H * 0.31 + Math.sin(t * 0.097) * H * 0.04;
+    const split = Math.pow(Math.max(0, Math.sin(t * 0.047 + murPh)), 3) * 190;   // now and then, two flocks
+    const rot = orbit + murDir * Math.PI / 2 + Math.sin(t * 0.11) * 0.5;       // stream along the path
+    const cr = Math.cos(rot), sr = Math.sin(rot);
+    const ct = Math.cos(t * 0.21 + murPh);              // the sheet's tumble about its long axis
+    const stretch = 1 + Math.sin(t * 0.13) * 0.35;
+    const dense = 1 / (0.22 + Math.abs(ct));            // edge-on: birds stack up, so brighter
+    const k = Math.min(3, dt * 60);
+    ctx.globalCompositeOperation = 'lighter';
+    for (let i = 0; i < pool.length; i++) {
+      const p = pool[i];
+      let u = p.mu * stretch, v = p.mw;
+      u += Math.sin(u * 0.012 - t * 1.7) * 26;         // compression wave running along the flock
+      v += Math.sin(u * 0.009 + t * 0.9) * 38;          // slow S-bend
+      const vy = v * ct, uu = u + (p.mg ? split : -split * 0.55);
+      const tx = cx + uu * cr - vy * sr, ty = cy + uu * sr + vy * cr;
+      if (p.mx == null) { p.mx = tx; p.my = ty; }
+      const f = 1 - Math.pow(1 - p.mr, k);
+      p.mx += (tx - p.mx) * f; p.my += (ty - p.my) * f;
+      const sp = lits[i % ns]; if (!sp) continue;
+      const r = 2.2 + p.ms * 1.1;
+      ctx.globalAlpha = Math.min(1, 0.5 * dense * p.mb) * w;
+      ctx.drawImage(sp, p.mx - r, p.my - r, r * 2, r * 2);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  // ---- Golden --------------------------------------------------------------------------------
+  // Phyllotaxis around the cover: seed i sits at angle i*theta, radius proportional to sqrt(i) —
+  // the sunflower's rule, with the art as the flower's heart. theta breathes a fraction of a
+  // degree either side of the golden angle; because the error compounds with i, the outer florets
+  // re-sort into sweeping spiral arms and then settle back into the perfect sunflower. Light runs
+  // along one family of Fibonacci spirals (seeds 13, 21 or 34 apart are neighbours).
+  const GOLDEN = Math.PI * (3 - Math.sqrt(5));
+  let golPh = 0, golDir = 1, golFam = 21;
+  function mGolden(pool, w) {
+    const ns = Math.max(1, sharps.length), t = tNow, n = Math.min(pool.length, 200);
+    const theta = GOLDEN + Math.sin(t * 0.031 + golPh) * 0.0105 + Math.sin(t * 0.083) * 0.0028;
+    const spin = t * 0.035 * golDir;
+    const cx = W / 2, cy = ART_CY, c = 42, i0 = 14.5;   // i0 opens a hole the size of the art
+    ctx.globalCompositeOperation = 'lighter';
+    for (let i = 0; i < n; i++) {
+      const r = c * Math.sqrt(i + i0) * (1 + Math.sin(t * 0.55 - i * 0.045) * 0.035);   // outward pulse
+      const a = i * theta + spin;
+      const x = cx + Math.cos(a) * r, y = cy + Math.sin(a) * r;
+      if (x < -30 || x > W + 30 || y < -30 || y > H + 30) continue;
+      const arm = i % golFam;
+      const lit = 0.5 + 0.5 * Math.sin(arm / golFam * 6.2832 - t * 0.9);
+      const sp = sharps[arm % ns]; if (!sp) continue;
+      const sz = (9 + Math.sqrt(i) * 1.5) * (0.75 + lit * 0.5);
+      ctx.globalAlpha = (0.20 + lit * 0.55) * w;
+      ctx.drawImage(sp, x - sz / 2, y - sz / 2, sz, sz);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  // ---- Harmonograph --------------------------------------------------------------------------
+  // A Victorian pendulum drawing machine. One pendulum swings the pen in x, one in y, each with a
+  // smaller octave partner that adds curls. The x:y ratio is a musical interval, detuned a hair
+  // so the figure slowly precesses. The pen inks its own paper canvas, which fades slowly, so you
+  // watch each figure being drawn. When the swing dies the pen lifts, the paper clears, and a new
+  // interval begins.
+  const INTERVALS = [[2, 3, 'perfect fifth'], [3, 4, 'perfect fourth'], [4, 5, 'major third'],
+                     [5, 6, 'minor third'], [3, 5, 'major sixth'], [1, 2, 'octave'], [5, 8, 'minor sixth']];
+  let paper = null, px = null, harm = null;
+  function newSwing() {
+    const iv = INTERVALS[(rnd() * INTERVALS.length) | 0];
+    const base = 0.55 + rnd() * 0.25;
+    const det = (0.008 + rnd() * 0.012) * (rnd() < 0.5 ? -1 : 1);
+    harm = {
+      iv, tau: 0, life: 26 + rnd() * 10, clearing: 0, fadeT: 0, labelT: 0,
+      fx: iv[0] * base, fy: iv[1] * base * (1 + det),
+      px: rnd() * 6.283, py: rnd() * 6.283, qx: rnd() * 6.283, qy: rnd() * 6.283,
+      ax: 470 + rnd() * 80, ay: 250 + rnd() * 45, ci: (rnd() * 3) | 0,
+    };
+  }
+  function harmAt(h, tau, ph) {
+    const d = Math.exp(-tau / (h.life * 1.25));        // the swing decays to ~45% before it ends
+    return [W / 2 + h.ax * d * (Math.sin(h.fx * tau + h.px + ph) + 0.22 * Math.sin(2 * h.fx * tau + h.qx)) / 1.22,
+            H / 2 + h.ay * d * (Math.sin(h.fy * tau + h.py) + 0.22 * Math.sin(2 * h.fy * tau + h.qy + ph)) / 1.22];
+  }
+  function mHarmonograph(pool, w, dt, mv) {
+    if (!paper) { paper = document.createElement('canvas'); paper.width = W; paper.height = H; px = paper.getContext('2d'); }
+    if (!harm) newSwing();
+    const h = harm, step = dt * mv;
+    const ns = Math.max(1, sprites.length), nsh = Math.max(1, lits.length);
+
+    // The paper fades in coarse steps, not a sliver every frame: an 8-bit channel can't lose less
+    // than one unit, so a tiny per-frame fade leaves permanent ghosts. The wipe between swings
+    // clears whatever residue remains.
+    h.fadeT += step;
+    const wipe = h.clearing > 0;
+    if (wipe || h.fadeT > 0.33) {
+      px.globalCompositeOperation = 'destination-out';
+      px.fillStyle = `rgba(0,0,0,${wipe ? 0.14 : 0.034})`;
+      px.fillRect(0, 0, W, H);
+      h.fadeT = 0;
+    }
+
+    if (wipe) {
+      h.clearing -= step;
+      if (h.clearing <= 0) { newSwing(); harm.labelT = 4; }
+    } else {
+      const t0 = h.tau; h.tau += step;
+      if (h.tau > h.life) h.clearing = 1.4;
+      px.globalCompositeOperation = 'lighter';
+      for (let pen = 0; pen < 2; pen++) {
+        const ph = pen * 1.5708;
+        const [x1, y1] = harmAt(h, t0, ph), [x2, y2] = harmAt(h, h.tau, ph);
+        const steps = Math.min(36, Math.max(1, Math.ceil(Math.hypot(x2 - x1, y2 - y1) / 2)));
+        const soft = sprites[(h.ci + pen) % ns], core = lits[(h.ci + pen) % nsh];
+        for (let j = 1; j <= steps; j++) {
+          const [x, y] = harmAt(h, t0 + (h.tau - t0) * j / steps, ph);
+          if (soft) { px.globalAlpha = 0.22; px.drawImage(soft, x - 5.5, y - 5.5, 11, 11); }
+          if (core) { px.globalAlpha = 0.75; px.drawImage(core, x - 1.8, y - 1.8, 3.6, 3.6); }
+        }
+      }
+      px.globalAlpha = 1;
+    }
+
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.globalAlpha = w;
+    ctx.drawImage(paper, 0, 0);
+    if (!wipe) {                                        // the glowing nibs, on top of their ink
+      for (let pen = 0; pen < 2; pen++) {
+        const [x, y] = harmAt(h, h.tau, pen * 1.5708), core = lits[(h.ci + pen) % nsh];
+        if (core) { ctx.globalAlpha = 0.9 * w; ctx.drawImage(core, x - 7, y - 7, 14, 14); }
+      }
+    }
+    // the interval, named briefly as each swing begins (top-left, mirroring the mode label)
+    if (h.labelT > 0) {
+      h.labelT -= dt;
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.globalAlpha = Math.max(0, Math.min(1, h.labelT, 4 - h.labelT)) * 0.7 * w;
+      ctx.fillStyle = '#fff'; ctx.textAlign = 'left';
+      ctx.font = '22px system-ui, sans-serif';
+      ctx.fillText(`${h.iv[2]}  ·  ${h.iv[0]}:${h.iv[1]}`, 112, 74);
+    }
+    ctx.globalAlpha = 1;
+  }
+
   function renderMode(id, pool, w, dt, mv, k) {
     switch (id) {
       case 0: return mDrift(pool, w, dt, mv, k);
@@ -479,6 +712,10 @@
       case 6: return mLattice(pool, w, dt, mv);
       case 7: return mBloom(pool, w, dt, mv);
       case 8: return mRain(pool, w, dt, mv);
+      case KAL: return mKaleido(pool, w);
+      case MUR: return mMurmur(pool, w, dt);
+      case GOL: return mGolden(pool, w);
+      case HAR: return mHarmonograph(pool, w, dt, mv);
     }
   }
 
@@ -682,7 +919,7 @@
     },
     cycle(d) {
       mode = (mode + d + AUTO + 1) % (AUTO + 1);   // AUTO sits past the last real mode
-      try { localStorage.viz_mode = String(mode); } catch (e) {}
+      try { localStorage.viz_mode = mode === AUTO ? 'Auto' : MODES[mode]; } catch (e) {}
       modeUntil = tNow + 2;
       if (mode === AUTO) { autoT = 0; autoIdx = 0; autoNextReady = -1; }
       initFor(mode === AUTO ? autoIdx : mode, poolA);
