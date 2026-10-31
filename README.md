@@ -4,7 +4,8 @@
 
 A lightweight Spotify client for Android TV: one WebView, the official
 [Web Playback SDK](https://developer.spotify.com/documentation/web-playback-sdk) for audio,
-a D-pad-first UI, and a full-screen visualizer that takes its palette from the album art.
+a D-pad-first UI, and a full-screen visualizer that reacts to the music itself and takes its
+palette from the album art.
 
 Built because the official Android TV client is heavier than an older set has to spare — a
 **6.9 MB APK against 210 MB installed**. The TV also registers as a Spotify Connect device,
@@ -17,7 +18,7 @@ so a phone works as a remote.
 | | |
 |---|---|
 | [Architecture](docs/architecture.md) | why a WebView, the secure origin, PKCE, background audio, platform limits |
-| [Visualizer](docs/visualizer.md) | all 13 modes plus Auto, the palette quantiser, performance findings |
+| [Visualizer](docs/visualizer.md) | all 15 modes plus Auto, the audio tap, the palette quantiser, performance findings |
 | [Footprint](docs/footprint.md) | measured disk and memory, against the official app |
 | [Troubleshooting](docs/troubleshooting.md) | Widevine gate, sign-in, shuffle, overscan |
 
@@ -57,10 +58,19 @@ adb -s <tv-ip>:5555 install -r app/build/outputs/apk/debug/app-debug.apk
 
 ## Visualizer
 
-Thirteen modes — Drift, Orbit, Aurora, Nebula, Starfield, Ribbons, Lattice, Bloom, Rain,
-Kaleido, Murmur, Golden and Harmonograph — plus a hidden **Auto** that cross-fades through
-them all. Colours are quantised from the current album art. Every mode holds 60 fps at
-~8 ms a frame on a 2019 MediaTek TV SoC.
+Fifteen modes — Drift, Orbit, Aurora, Nebula, Starfield, Ribbons, Lattice, Bloom, Rain,
+Kaleido, Murmur, Golden, Harmonograph, Halo and Scope — plus **Auto**, the default, which
+cross-fades through them all. Colours are quantised from the current album art.
+
+It's audio-reactive from the real signal. The Web Playback SDK's audio is out of reach of page
+script, so the native shell reads the TV's output mix with Android's `Visualizer`
+(`AudioTap.kt`) and streams spectrum bands and a waveform to the page at 60 Hz. Every mode
+turns bass, mid, treble, loudness and beat onsets into motion its own way; Halo (a spectrum
+ring) and Scope (a waveform ring) exist only with a signal. With no signal — paused, or the
+permission declined — every mode eases back to its ambient self.
+
+Android gates output capture behind the **record audio** permission, asked the first time the
+visualizer opens. The microphone is never opened.
 
 Details and the performance work in [docs/visualizer.md](docs/visualizer.md).
 
@@ -68,6 +78,7 @@ Details and the performance work in [docs/visualizer.md](docs/visualizer.md).
 
 ```
 app/src/main/java/.../MainActivity.kt     WebView, DRM permission grant, OAuth redirect capture
+app/src/main/java/.../AudioTap.kt         output-mix analysis for the visualizer
 app/src/main/java/.../PlaybackService.kt  foreground media service — audio survives leaving the app
 app/src/main/assets/
   index.html  style.css  app.js           the UI

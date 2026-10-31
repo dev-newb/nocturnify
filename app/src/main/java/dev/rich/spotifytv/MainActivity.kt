@@ -1,7 +1,10 @@
 package dev.rich.spotifytv
 
+import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.content.pm.ApplicationInfo
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
 import android.util.Log
@@ -14,6 +17,7 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
+import androidx.webkit.JavaScriptReplyProxy
 import androidx.webkit.WebViewAssetLoader
 import androidx.webkit.WebViewClientCompat
 import androidx.webkit.WebViewCompat
@@ -28,16 +32,23 @@ import org.json.JSONObject
  * — and the WebView's audio — alive after the user leaves the app. The page pushes its play
  * state here via a WebMessageListener scoped to our own origin; media buttons flow back the
  * other way, from the session callback into player.* JS calls.
+ *
+ * Visualiser audio: AudioTap reads the TV's output mix (the SDK's own audio is out of reach) and
+ * streams analysis frames back over the AudioBridge listener, again scoped to our own origin.
  */
 class MainActivity : Activity() {
 
     private lateinit var web: WebView
+    private var audioReply: JavaScriptReplyProxy? = null
+    private val tap = AudioTap { line -> audioReply?.postMessage(line) }
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         PlaybackService.ensureSession(this)
+        // Debug builds only: lets chrome://inspect (over the adb connection) drive the page.
+        if (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0) WebView.setWebContentsDebuggingEnabled(true)
 
         val assets = WebViewAssetLoader.Builder()
             .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(this))
@@ -94,6 +105,14 @@ class MainActivity : Activity() {
                     PlaybackService.push(this, o.optBoolean("playing"), o.optString("title"), o.optString("artist"))
                 } catch (e: Exception) { Log.w(TAG, "bridge parse: ${e.message}") }
             }
+            // Visualiser audio: "on" / "off" from the page; frames flow back on the same object.
+            WebViewCompat.addWebMessageListener(web, "AudioBridge", setOf(ORIGIN)) { _, message, _, _, reply ->
+                audioReply = reply
+                when (message.data) {
+                    "on" -> startTap()
+                    "off" -> tap.stop()
+                }
+            }
         }
         // Session (media buttons) -> page.
         PlaybackService.controlSink = { js -> runOnUiThread { web.evaluateJavascript(js, null) } }
@@ -107,9 +126,30 @@ class MainActivity : Activity() {
         intent.getStringExtra("page")?.let { web.loadUrl("$ORIGIN/assets/$it") }
     }
 
+    // ---------- audio tap ----------
+    private fun startTap() {
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), REQ_AUDIO)
+            return
+        }
+        val err = tap.start()
+        audioReply?.postMessage(if (err == null) "on" else "unavailable $err")
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, results: IntArray) {
+        if (requestCode != REQ_AUDIO) return
+        if (results.firstOrNull() == PackageManager.PERMISSION_GRANTED) startTap()
+        else audioReply?.postMessage("denied")
+    }
+
     // NB: deliberately no onPause/onStop override that pauses the WebView — audio must keep
     // running in the background. The foreground service keeps the process alive; onStop is the
-    // resting state when the user presses Home.
+    // resting state when the user presses Home. The audio tap is the exception: it only serves
+    // the visualiser, so it stops when the app is out of sight.
+    override fun onStop() {
+        tap.stop()
+        super.onStop()
+    }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
         when (keyCode) {
@@ -139,6 +179,7 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         // Real teardown only (back-out / task swipe): stop audio and release.
+        tap.stop()
         PlaybackService.controlSink = null
         PlaybackService.push(this, false, "", "")
         stopService(android.content.Intent(this, PlaybackService::class.java))
@@ -148,6 +189,7 @@ class MainActivity : Activity() {
 
     companion object {
         private const val TAG = "SpotifyTV"
+        private const val REQ_AUDIO = 7
         const val ORIGIN = "https://appassets.androidplatform.net"
         const val DESKTOP_UA =
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"

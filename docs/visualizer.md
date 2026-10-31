@@ -6,6 +6,26 @@ A 1280×720 canvas stretched to the panel, redrawn each frame. All coordinates l
 Enter it from the sidebar, or let it arrive on its own after 60 s idle. ▲ ▼ change mode,
 ◀ ▶ change track, OK toggles play/pause, Back exits.
 
+## Audio
+
+Every mode reacts to the music, from the real signal rather than a guessed tempo (a faked BPM
+pulse drifts audibly against the music within seconds).
+
+The page can't hear the music itself: the Web Playback SDK exposes no media element, Widevine
+media reaches Web Audio as silence, and `/audio-analysis` is 403 for Development-mode apps. So
+`AudioTap.kt` attaches Android's `Visualizer` to audio session 0 — the device's output mix, the
+same PCM the speakers get — and polls it at 60 Hz. Each frame goes to the page over the
+`AudioBridge` message listener (our own origin only) as one line: RMS, 24 log-spaced spectrum
+bands from 40 Hz to 16 kHz in dB, and 64 waveform samples triggered at a rising zero crossing.
+
+`viz.js` normalises each band against its own recent range, so quiet and loud masters both use
+the full scale, and derives bass / mid / treble, loudness relative to the last 8 s, and beat
+onsets from low-band spectral flux. When the signal goes (pause, a declined permission, a
+silent intro) everything eases to a neutral 0.5 and each mode is exactly its ambient self.
+
+Android gates output capture behind `RECORD_AUDIO`, asked once, the first time the visualizer
+opens. The microphone is never opened. The tap stops whenever the app is out of sight.
+
 ## Modes
 
 | Mode | Character | Trail |
@@ -23,7 +43,9 @@ Enter it from the sidebar, or let it arrive on its own after 60 s idle. ▲ ▼ 
 | Murmur | a starling murmuration wheeling around the cover; waves of density pass through it, and it sometimes splits in two | 0.26 |
 | Golden | sunflower phyllotaxis with the cover as its heart; the seed angle breathes around the golden angle, so spiral arms form and dissolve | 0.16 |
 | Harmonograph | a pendulum drawing machine inking figures at musical intervals — fifth 3:2, fourth 4:3, major third 5:4 — named as each begins | 1.0 |
-| **Auto** | cross-fades through all thirteen — a hidden slot, reached by paging past either end | — |
+| Halo | the spectrum as a ring of bars around the cover, bass at the top, mirrored; peaks reach the screen edge | 0.30 |
+| Scope | the waveform drawn as two rings around the cover, swelling with bass and beats | 0.22 |
+| **Auto** | cross-fades through all fifteen — the default, and a hidden slot reached by paging past either end. Skips Halo and Scope while there's no signal | — |
 
 210 particles. Auto holds each mode 22 s and cross-fades over 5 s.
 

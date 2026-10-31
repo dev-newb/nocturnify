@@ -1,22 +1,27 @@
-// viz.js — ambient now-playing visualiser (13 modes plus a hidden Auto; ◀ ▶ to cycle).
+// viz.js — now-playing visualiser (15 modes plus a hidden Auto; ▲ ▼ to cycle).
 //
-// Deliberately NOT audio-reactive, because it cannot be: probing the running app showed the
-// Web Playback SDK exposes ZERO media elements to the DOM, so Web Audio has nothing to tap,
-// and /audio-analysis + /audio-features are 403 for Development-mode apps — no tempo, no beat
-// grid. A faked BPM pulse drifts audibly against the real music, so motion is driven only by
-// things that are true: interpolated playback position, a per-track seed, and a palette
-// quantised from the cover art's actual pixels.
+// Audio-reactive from the real signal. Web Audio can't hear the Web Playback SDK (it exposes no
+// media element, and Widevine-protected media reaches page script as silence anyway), and
+// /audio-analysis is 403 for Development-mode apps, so the native shell taps the TV's output
+// mix with Android's Visualizer and streams spectrum bands + waveform in (AudioTap.kt). Beat,
+// loudness and band energies are derived here, from that stream — never from a guessed tempo,
+// which drifts audibly against the music.
+//
+// When there's no signal (paused, permission declined, tap unavailable) every audio feature
+// eases to a neutral 0.5 and each mode is exactly its ambient self: motion from playback
+// position, a per-track seed, and a palette quantised from the cover art's actual pixels.
 (function () {
   const W = 1280, H = 720;
   const NPART = 210;
   const FPS = 60;             // load reduction didn't correlate with the audio gaps — restored
   const MODES = ['Drift', 'Orbit', 'Aurora', 'Nebula', 'Starfield', 'Ribbons', 'Lattice', 'Bloom', 'Rain',
-                 'Kaleido', 'Murmur', 'Golden', 'Harmonograph'];
-  const KAL = 9, MUR = 10, GOL = 11, HAR = 12;
+                 'Kaleido', 'Murmur', 'Golden', 'Harmonograph', 'Halo', 'Scope'];
+  const KAL = 9, MUR = 10, GOL = 11, HAR = 12, HALO = 13, SCOPE = 14;
+  const AUDIO_ONLY = new Set([HALO, SCOPE]);   // nothing to show without a signal; Auto skips them then
   const AUTO = MODES.length;            // hidden slot: sits between the last and first
   // per-mode trail persistence. Harmonograph is 1: its persistence lives in its own paper
   // canvas, and a trail on top would multiply the ink's brightness by 1/trail.
-  const TRAIL = [0.135, 0.135, 0.09, 0.055, 0.13, 0.10, 0.22, 0.10, 0.20, 0.30, 0.26, 0.16, 1.0];
+  const TRAIL = [0.135, 0.135, 0.09, 0.055, 0.13, 0.10, 0.22, 0.10, 0.20, 0.30, 0.26, 0.16, 1.0, 0.30, 0.22];
   const HOLD = 22, FADE = 5;            // Auto: seconds held, seconds cross-fading
   const ART_CY = H * 0.355, ART_SZ = 268;
 
@@ -25,9 +30,9 @@
   let autoIdx = 0, autoT = 0, autoNextReady = -1;
   // accents from a near-black cover are almost invisible as thin strokes; lift them a little
   const lift = (c, m = 0.38) => [c[0] + (255 - c[0]) * m, c[1] + (255 - c[1]) * m, c[2] + (255 - c[2]) * m];
-  let lastDraw = 0;
+  let lastDraw = 0, flashT = 0, flashTxt = '', hintT = 0;
   let artImg = null, artUrl = '', lastTrack = '';
-  let seed = 1, tPrev = 0, tNow = 0, mode = 0, modeUntil = 0, seekPreview = null, seekShown = null;
+  let seed = 1, tPrev = 0, tNow = 0, mode = AUTO, modeUntil = 0, seekPreview = null, seekShown = null;
 
   const rnd = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296);
   const hash = s => { let h = 2166136261; for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return h >>> 0; };
@@ -35,11 +40,99 @@
   const rgb = c => `rgb(${c[0] | 0},${c[1] | 0},${c[2] | 0})`;
   const mmss = ms => { const t = Math.max(0, Math.floor((ms || 0) / 1000)); return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}`; };
 
+  // ---- audio ---------------------------------------------------------------------------------
+  // The tap sends ~60 lines a second: "a <rms mB> <24 band dB values> | <64 waveform samples>".
+  // Modes read only the features in A, all 0..1 and centred on 0.5 when there's no signal:
+  //   bands[24]          per-band level, auto-gained against each band's own floor and peak
+  //   bass, mid, treble  band-group levels      energy  loudness, slow (~1s) and auto-gained
+  //   beat               jumps to 1 on an onset, decays over ~0.2s (0 without a signal)
+  //   wave[64]           the waveform, -1..1 (flat without a signal)
+  // A.mix is how much of the live signal is in all of that; it eases between 0 and 1, so losing
+  // or regaining audio (pause, permission, a quiet intro) never snaps the picture.
+  const NB = 24, NW = 64;
+  const A = { mix: 0, bands: new Float32Array(NB).fill(0.5), bass: 0.5, mid: 0.5, treble: 0.5, energy: 0.5,
+              beat: 0, wave: new Float32Array(NW), state: 'off', peaks: new Float32Array(NB) };
+  const R = { seq: 0, used: 0, at: 0, rms: -9600, db: new Float32Array(NB), prev: new Float32Array(NB),
+              lo: new Float32Array(NB).fill(12), hi: new Float32Array(NB).fill(30), sm: new Float32Array(NB),
+              avg: new Float32Array(NB).fill(20),
+              wave: new Float32Array(NW), lv: 0, lvAvg: 0.5, en: 0.5, flux: 0, fluxDev: 1, lastBeat: 0, env: 0, beats: 0 };
+  const amp = (v, depth) => 1 + (v - 0.5) * depth;    // 0.5 (no signal) -> exactly 1
+  const clamp01 = v => (v < 0 ? 0 : v > 1 ? 1 : v);
+
+  function onAudio(line) {
+    if (typeof line !== 'string') return;
+    if (line[0] !== 'a') {                             // control replies: on / denied / unavailable …
+      A.state = line.split(' ')[0];
+      console.log('[viz] audio:', line);
+      return;
+    }
+    const bar = line.indexOf('|');
+    const head = line.slice(2, bar).split(' '), tail = line.slice(bar + 2).split(' ');
+    R.rms = +head[0];
+    for (let b = 0; b < NB; b++) R.db[b] = +head[b + 1] || 0;
+    for (let i = 0; i < NW; i++) R.wave[i] = (+tail[i] || 0) / 128;
+    R.seq++; R.at = performance.now();
+  }
+
+  function updateAudio(dt, now) {
+    const fresh = R.seq !== R.used;
+    R.used = R.seq;
+    // live = frames arriving and not silence (-60 dB); paused music sends frames of nothing
+    const live = now - R.at < 400 && R.rms > -6000;
+    A.mix += ((live ? 1 : 0) - A.mix) * Math.min(1, dt * (live ? 2.2 : 0.9));
+    const ease = (tau) => 1 - Math.exp(-dt / tau);
+    if (fresh) {
+      let flux = 0;
+      for (let b = 0; b < NB; b++) {
+        const v = R.db[b];
+        // Each band is read as its swing around its own recent (~1.2s) average, scaled by its
+        // recent range (floor creeps up / peak creeps down, both snapping to new extremes). Where
+        // a band sits in absolute terms barely moves in mastered music — measured on the TV, a
+        // sustained bass line held a floor-to-peak reading near 0.9 — but its swings are the beat.
+        R.lo[b] = v < R.lo[b] ? v : Math.min(R.lo[b] + 3 * dt, R.hi[b] - 8);
+        R.hi[b] = v > R.hi[b] ? v : Math.max(R.hi[b] - 6 * dt, R.lo[b] + 8);
+        R.avg[b] += (v - R.avg[b]) * ease(1.2);
+        const n = clamp01(0.5 + (v - R.avg[b]) / (R.hi[b] - R.lo[b]) * 1.8);
+        R.sm[b] += (n - R.sm[b]) * ease(n > R.sm[b] ? 0.035 : 0.16);
+        if (b < 10) flux += Math.max(0, v - R.prev[b]) * (b < 5 ? 1.4 : 0.8);   // onsets live low
+        R.prev[b] = v;
+      }
+      // onset: flux well above its own running mean + deviation, at most ~4 a second
+      const above = flux - R.flux;
+      R.flux += above * 0.06; R.fluxDev += (Math.abs(above) - R.fluxDev) * 0.06;
+      if (live && above > R.fluxDev * 1.8 + 3.5 && now - R.lastBeat > 280) { R.env = 1; R.lastBeat = now; R.beats++; }
+      // loudness: rms (mB) to 0..1 over -45..-5 dB
+      R.lv = clamp01((R.rms / 100 + 45) / 40);
+      for (let i = 0; i < NW; i++) A.wave[i] = R.wave[i] * A.mix;
+    }
+    // energy is loudness against the song's own recent average (~8s), not an absolute level:
+    // mastered music sits near full scale throughout, so absolute loudness barely moves.
+    // +-0.1 of level (4 dB) spans the whole 0..1 range.
+    if (live) R.lvAvg += (R.lv - R.lvAvg) * ease(8);
+    R.en += (clamp01(0.5 + (R.lv - R.lvAvg) * 5) - R.en) * ease(0.6);
+    R.env *= Math.exp(-dt / 0.19);
+    const m = A.mix;
+    let bs = 0, md = 0, tr = 0;
+    for (let b = 0; b < NB; b++) {
+      A.bands[b] = 0.5 + (R.sm[b] - 0.5) * m;
+      A.peaks[b] = Math.max(A.bands[b], A.peaks[b] - dt * 0.5);
+      if (b < 5) bs += R.sm[b]; else if (b < 14) md += R.sm[b]; else tr += R.sm[b];
+    }
+    A.bass = 0.5 + (bs / 5 - 0.5) * m;
+    A.mid = 0.5 + (md / 9 - 0.5) * m;
+    A.treble = 0.5 + (tr / 10 - 0.5) * m;
+    A.energy = 0.5 + (R.en - 0.5) * m;
+    A.beat = R.env * m;
+    A.onset = R.lastBeat !== R.seen && m > 0.3;        // true for the one frame a beat lands
+    R.seen = R.lastBeat;
+  }
+  const bandAvg = (lo, hi) => { let t = 0; for (let b = lo; b < hi; b++) t += A.bands[b]; return t / (hi - lo); };
+
   try {
     const v = localStorage.viz_mode || '';
     const byName = v === 'Auto' ? AUTO : MODES.indexOf(v);
     const legacy = parseInt(v, 10);          // older builds stored an index, and Auto was 9
-    mode = byName >= 0 ? byName : (legacy === 9 ? AUTO : (legacy >= 0 && legacy < 9 ? legacy : 0));
+    mode = !v ? AUTO : byName >= 0 ? byName : (legacy === 9 ? AUTO : (legacy >= 0 && legacy < 9 ? legacy : 0));
   } catch (e) {}
 
   // ---- palette straight out of the cover art -------------------------------
@@ -190,6 +283,7 @@
       p.mw = (rnd() + rnd() + rnd() - 1.5) * 2 * 48;
       p.mg = rnd() < 0.38; p.mr = 0.05 + rnd() * 0.2; p.mb = 0.6 + rnd() * 0.8; p.ms = rnd() * 2.2;
       p.mx = null; p.my = null;
+      p.bi = (rnd() * NB) | 0;                 // the spectrum band this particle listens to
     }
     if (id === KAL) { kalN = [8, 10, 12][(rnd() * 3) | 0]; kalPh = rnd() * 6.283; kalDir = rnd() < 0.5 ? -1 : 1; }
     if (id === MUR) { murPh = rnd() * 6.283; murDir = rnd() < 0.5 ? -1 : 1; }
@@ -208,32 +302,36 @@
     ctx.globalCompositeOperation = 'lighter';
     for (const p of pool) {
       const ang = field(p.x, p.y, tNow, k);
-      p.x += Math.cos(ang) * p.sp * dt * mv;
-      p.y += Math.sin(ang) * p.sp * dt * mv;
+      const surge = 1 + A.beat * 3;                    // every beat throws the motes along the flow
+      p.x += Math.cos(ang) * p.sp * dt * mv * surge;
+      p.y += Math.sin(ang) * p.sp * dt * mv * surge;
       p.age += dt * mv;
       if (p.age > p.life || p.x < -60 || p.x > W + 60 || p.y < -60 || p.y > H + 60) {
         p.x = rnd() * W; p.y = rnd() * H; p.age = 0;
       }
       const f = Math.sin(Math.min(1, p.age / p.life) * Math.PI);
       const sp = sprites[p.si]; if (!sp) continue;
-      ctx.globalAlpha = 0.30 * f * w;
-      ctx.drawImage(sp, p.x - p.sz / 2, p.y - p.sz / 2, p.sz, p.sz);
+      const bv = A.bands[p.bi], sz = p.sz * (amp(bv, 1.6) + A.beat * 0.8);   // each mote listens to its own band
+      ctx.globalAlpha = Math.min(1, 0.30 * f * (amp(bv, 1.7) + A.beat * 0.7)) * w;
+      ctx.drawImage(sp, p.x - sz / 2, p.y - sz / 2, sz, sz);
     }
     ctx.globalAlpha = 1;
   }
 
   function mOrbit(pool, w, dt, mv) {
     ctx.globalCompositeOperation = 'lighter';
+    const kick = amp(A.bass, 0.3) + A.beat * 0.12;      // the whole system breathes on the bass
     for (const p of pool) {
-      p.a += p.dir * (0.34 / (0.45 + p.r / 300)) * dt * mv;
-      const x = W / 2 + Math.cos(p.a) * p.r;
-      const y = H / 2 + Math.sin(p.a) * p.r * 0.62;
+      p.a += p.dir * (0.34 / (0.45 + p.r / 300)) * dt * mv * (1 + A.beat * 2.5);
+      const x = W / 2 + Math.cos(p.a) * p.r * kick;
+      const y = H / 2 + Math.sin(p.a) * p.r * 0.62 * kick;
       p.age += dt * mv;
       if (p.age > p.life) p.age = 0;
       const f = Math.sin(Math.min(1, p.age / p.life) * Math.PI);
       const sp = sprites[p.si]; if (!sp) continue;
-      ctx.globalAlpha = 0.30 * f * w;
-      ctx.drawImage(sp, x - p.sz / 2, y - p.sz / 2, p.sz, p.sz);
+      const bv = A.bands[p.bi], sz = p.sz * (amp(bv, 1.5) + A.beat * 0.6);
+      ctx.globalAlpha = Math.min(1, 0.30 * f * (amp(bv, 1.7) + A.beat * 0.6)) * w;
+      ctx.drawImage(sp, x - sz / 2, y - sz / 2, sz, sz);
     }
     ctx.globalAlpha = 1;
   }
@@ -242,11 +340,12 @@
     if (!curtains.length) return;
     ctx.globalCompositeOperation = 'lighter';
     for (let i = 0; i < 7; i++) {
+      const g = bandAvg(i * 3, i * 3 + 4);             // each curtain is its own slice of the spectrum
       const x = W / 2 + Math.sin(tNow * 0.17 + i * 1.7) * W * 0.36;
       const cw = 130 + Math.sin(tNow * 0.23 + i * 2.1) * 70;
-      const hh = H * (0.75 + Math.sin(tNow * 0.13 + i) * 0.18);
+      const hh = H * (0.75 + Math.sin(tNow * 0.13 + i) * 0.18) * amp(g, 0.9);
       const y = H * 0.5 - hh / 2 + Math.sin(tNow * 0.11 + i * 0.9) * 40;
-      ctx.globalAlpha = 0.20 * w;
+      ctx.globalAlpha = Math.min(1, 0.20 * (amp(g, 1.8) + A.beat * 0.8)) * w;
       ctx.drawImage(curtains[i % curtains.length], x - cw / 2, y, cw, hh);
     }
     ctx.globalAlpha = 1;
@@ -262,9 +361,9 @@
       p.nph += dt * mv * 0.25;
       if (p.x < -p.nr) p.x = W + p.nr; else if (p.x > W + p.nr) p.x = -p.nr;
       if (p.y < -p.nr) p.y = H + p.nr; else if (p.y > H + p.nr) p.y = -p.nr;
-      const r = p.nr * (0.86 + Math.sin(p.nph) * 0.14);
+      const r = p.nr * (0.86 + Math.sin(p.nph) * 0.14) * (amp(A.bass, 0.5) + A.beat * 0.14);
       const sp = sprites[p.si]; if (!sp) continue;
-      ctx.globalAlpha = 0.085 * w;
+      ctx.globalAlpha = (0.085 * amp(A.energy, 0.8) + A.beat * 0.07) * w;
       ctx.drawImage(sp, p.x - r, p.y - r, r * 2, r * 2);
     }
     ctx.globalAlpha = 1;
@@ -283,8 +382,10 @@
     let cometCount = 0, comet = null;
     for (const p of pool) if (p.comet) cometCount++;
 
+    const warp = amp(A.energy, 0.9) + A.beat * 3.2;     // a surge forward on every beat
+    const twinkle = amp(A.treble, 0.9) + A.beat * 0.4;
     for (const p of pool) {
-      p.z -= dt * mv * 0.34;
+      p.z -= dt * mv * 0.34 * warp;
       const x = W / 2 + (p.dx / p.z) * 210;
       const y = H / 2 + (p.dy / p.z) * 210;
       if (p.z < 0.06 || x < -220 || x > W + 220 || y < -220 || y > H + 220) {
@@ -306,7 +407,7 @@
       if (p.stroked) continue;                       // drawn in the batched pass below
       const sp = sprites[p.si % ns]; if (!sp) continue;
       const r = 2.5 + near * 15;
-      ctx.globalAlpha = (0.22 + near * 0.58) * w;
+      ctx.globalAlpha = Math.min(1, (0.22 + near * 0.58) * twinkle) * w;
       ctx.drawImage(sp, x - r, y - r, r * 2, r * 2);
     }
 
@@ -323,7 +424,7 @@
         ctx.moveTo(p.sx, p.sy); ctx.lineTo(p.cx, p.cy); any = true;
       }
       if (!any) continue;
-      ctx.strokeStyle = `rgba(${scStr},${(SB_A[band] * w).toFixed(3)})`;
+      ctx.strokeStyle = `rgba(${scStr},${Math.min(1, SB_A[band] * twinkle * w).toFixed(3)})`;
       ctx.lineWidth = SB_W[band];
       ctx.stroke();
     }
@@ -364,16 +465,18 @@
   function mRibbons(pool, w) {
     ctx.globalCompositeOperation = 'lighter';
     const bands = 4, step = 30;
+    const groups = [A.bass, bandAvg(5, 10), bandAvg(10, 16), A.treble];   // one ribbon per register
     for (let b = 0; b < bands; b++) {
       const c = pal.acc[b % pal.acc.length] || [180, 200, 235];
-      const ph = b * 1.24, amp = H * (0.10 + (b % 3) * 0.045);
-      ctx.strokeStyle = `rgba(${c[0] | 0},${c[1] | 0},${c[2] | 0},${(0.20 * w).toFixed(3)})`;
-      ctx.lineWidth = 10 + (b % 3) * 7;
+      const g = groups[b];
+      const ph = b * 1.24, am = H * (0.10 + (b % 3) * 0.045) * (amp(g, 1.6) + A.beat * 0.25);
+      ctx.strokeStyle = `rgba(${c[0] | 0},${c[1] | 0},${c[2] | 0},${Math.min(1, 0.20 * (amp(g, 1.4) + A.beat * 0.6) * w).toFixed(3)})`;
+      ctx.lineWidth = (10 + (b % 3) * 7) * amp(g, 0.9);
       ctx.beginPath();
       for (let x = -step; x <= W + step; x += step) {
         const y = H / 2
-          + Math.sin(x * 0.0043 + tNow * 0.42 + ph) * amp
-          + Math.sin(x * 0.0017 - tNow * 0.25 + ph * 1.7) * amp * 0.7
+          + Math.sin(x * 0.0043 + tNow * 0.42 + ph) * am
+          + Math.sin(x * 0.0017 - tNow * 0.25 + ph * 1.7) * am * 0.7
           + Math.sin(tNow * 0.15 + ph) * 40;
         if (x <= -step) ctx.moveTo(x, y); else ctx.lineTo(x, y);
       }
@@ -384,20 +487,28 @@
 
   // Lattice — a standing wave crossing a geometric grid; only crests are drawn, so most
   // cells cost nothing and the field reads as a pulse travelling outward.
+  // With a signal, distance from the centre is pitch — bass in the middle, treble at the rim — and
+  // every beat launches a ring outward through the grid.
+  let latRing = -1, latRingS = 0;
   function mLattice(pool, w, dt, mv) {
     ctx.globalCompositeOperation = 'lighter';
     const cols = 22, rows = 13, dx = W / cols, dy = H / rows;
     const ns = Math.max(1, sprites.length);
+    if (A.onset) { latRing = 0; latRingS = A.mix; }
+    if (latRing >= 0) { latRing += 760 * dt; if (latRing > 800) latRing = -1; }
     for (let gy = 0; gy < rows; gy++) {
       const y = (gy + 0.5) * dy, ry = y - H / 2;
       for (let gx = 0; gx < cols; gx++) {
         const x = (gx + 0.5) * dx, rx = x - W / 2;
         const d = Math.sqrt(rx * rx + ry * ry);
-        const f = Math.sin(d * 0.011 - tNow * 1.5);
+        let f = Math.sin(d * 0.011 - tNow * 1.5);
+        if (latRing >= 0) { const q = (d - latRing) / 55; f += latRingS * 0.9 * Math.exp(-q * q); }
         if (f < 0.05) continue;                       // troughs cost nothing
+        if (f > 1) f = 1;
         const sp = sprites[(gx + gy) % ns]; if (!sp) continue;
-        const r = 6 + f * 30;
-        ctx.globalAlpha = 0.50 * f * w;
+        const bv = A.bands[Math.min(NB - 1, (d / 740 * NB) | 0)];
+        const r = (6 + f * 30) * amp(bv, 1.5);
+        ctx.globalAlpha = Math.min(1, 0.50 * f * amp(bv, 1.6)) * w;
         ctx.drawImage(sp, x - r, y - r, r * 2, r * 2);
       }
     }
@@ -420,12 +531,12 @@
 
       if (p.esc === 0) {
         p.ba += p.bs * dt * mv * 0.35;
-        if (escaping < 2 && rnd() < dt * mv * 0.0127) { p.esc = 1; escaping++; }   // ~15% more
+        if (escaping < 2 && (rnd() < dt * mv * 0.0127 || (A.onset && rnd() < 0.12))) { p.esc = 1; escaping++; }   // ~15% more; beats free some
       }
 
       if (p.esc === 0) {
         const rr = p.br * (0.85 + Math.sin(tNow * 0.5 + i) * 0.15);
-        const sz = (14 + p.sz * 1.15) * (0.75 + Math.sin(tNow * 0.7 + i * 1.9) * 0.25);
+        const sz = (14 + p.sz * 1.15) * (0.75 + Math.sin(tNow * 0.7 + i * 1.9) * 0.25) * (amp(A.bass, 1.1) + A.beat * 0.45);
         ctx.globalAlpha = (0.14 + 0.12 * (1 - i / N)) * w;
         // Instability rises sharply toward the centre. Jitter is per-ARM, not per-point, so
         // the inner rings fray out of symmetry instead of wobbling in lockstep.
@@ -489,13 +600,13 @@
     ctx.translate(W / 2, 0); ctx.rotate(tilt); ctx.translate(-W / 2, 0);
     const nc = curtains.length;
     for (const p of pool) {
-      p.ry += p.rs * dt * mv;
+      p.ry += p.rs * dt * mv * (amp(A.energy, 0.8) + A.beat * 1.5);
       p.rx += (gust * 26 + p.rd) * dt * mv;         // drift with the gust, plus its own bias
       if (p.ry - p.rl > H + 40) { p.ry = -p.rl - rnd() * 260; p.rx = -W * 0.25 + rnd() * W * 1.5; }
       if (p.rx < -W * 0.3) p.rx += W * 1.6; else if (p.rx > W * 1.3) p.rx -= W * 1.6;
       const near = p.rs > 600 ? 1 : (p.rs > 420 ? 0.68 : 0.42);
       const cw = p.rw * (0.55 + near * 0.85);       // per-streak width, scaled by depth
-      ctx.globalAlpha = (0.14 + near * 0.34) * w;
+      ctx.globalAlpha = Math.min(1, (0.14 + near * 0.34) * (amp(A.treble, 0.9) + A.beat * 0.5)) * w;
       ctx.drawImage(curtains[p.si % nc], p.rx - cw / 2, p.ry - p.rl, cw, p.rl);
     }
     ctx.restore();
@@ -506,7 +617,7 @@
   // The cover art itself, cut into a wedge and mirrored into a mandala that radiates from behind
   // the art. One clip and one drawImage build the wedge off-screen each frame; the n-fold figure
   // is then n blits of it with a rotation, every other one mirrored so the seams line up.
-  let kal = null, kx = null, kalScrim = null, kalN = 10, kalPh = 0, kalDir = 1;
+  let kal = null, kx = null, kalN = 10, kalPh = 0, kalDir = 1;
   const KAL_R = 820;                                  // reaches the far corner from the art centre
   function mKaleido(pool, w) {
     if (!artImg) return;
@@ -519,7 +630,7 @@
     kx.beginPath(); kx.moveTo(0, kc); kx.arc(0, kc, KAL_R, -half, half); kx.closePath(); kx.clip();
     // a magnified copy of the art turns (and drifts slightly) under the wedge, so the figure keeps
     // re-forming — like turning the tube of a real kaleidoscope
-    const S = 1150;
+    const S = 1150 * (amp(A.bass, 0.16) + A.beat * 0.07);
     kx.translate(KAL_R / 2 + Math.sin(tNow * 0.071 + kalPh) * 40,
                  kc + Math.sin(tNow * 0.053 + kalPh * 1.7) * 40);
     kx.rotate(tNow * 0.045 + kalPh);
@@ -529,7 +640,7 @@
     const cx = W / 2, cy = ART_CY, spin = tNow * 0.028 * kalDir;
     ctx.globalCompositeOperation = 'source-over';
     const lum = prevPal && palMix < 1 ? lerp(prevPal.lum ?? 0.35, pal.lum ?? 0.35, palMix) : (pal.lum ?? 0.35);
-    ctx.globalAlpha = 0.19 * Math.max(0.6, Math.min(1.6, 0.35 / Math.max(0.05, lum))) * w;
+    ctx.globalAlpha = Math.min(1, 0.19 * Math.max(0.6, Math.min(1.6, 0.35 / Math.max(0.05, lum))) * (1 + A.beat * 0.6)) * w;
     for (let i = 0; i < kalN; i++) {
       const a = spin + i * 2 * half, m = (i & 1) ? -1 : 1;
       const c = Math.cos(a), sn = Math.sin(a);
@@ -537,15 +648,7 @@
       ctx.drawImage(kal, 0, kc - kh / 2, KAL_R, kh, 0, -kh / 2, KAL_R, kh);   // the wedge's strip only
     }
     ctx.setTransform(1, 0, 0, 1, 0, 0);
-    if (!kalScrim) {
-      kalScrim = document.createElement('canvas'); kalScrim.width = kalScrim.height = 256;
-      const g = kalScrim.getContext('2d'), rg = g.createRadialGradient(128, 128, 0, 128, 128, 128);
-      rg.addColorStop(0, 'rgba(0,0,0,0.78)'); rg.addColorStop(0.55, 'rgba(0,0,0,0.5)'); rg.addColorStop(1, 'rgba(0,0,0,0)');
-      g.fillStyle = rg; g.fillRect(0, 0, 256, 256);
-    }
-    const ty = ART_CY + ART_SZ / 2 + 110;               // centre of the title/artist/album block
-    ctx.globalAlpha = w;
-    ctx.drawImage(kalScrim, W / 2 - 520, ty - 150, 1040, 300);
+    scrimText(w);
     ctx.globalAlpha = 1;
   }
 
@@ -568,12 +671,13 @@
     const stretch = 1 + Math.sin(t * 0.13) * 0.35;
     const dense = 1 / (0.22 + Math.abs(ct));            // edge-on: birds stack up, so brighter
     const k = Math.min(3, dt * 60);
+    const waveU = 26 * (amp(A.mid, 1.8) + A.beat * 1.2), waveV = 38 * amp(A.bass, 1.6), shine = amp(A.energy, 0.7) + A.beat * 0.6;
     ctx.globalCompositeOperation = 'lighter';
     for (let i = 0; i < pool.length; i++) {
       const p = pool[i];
       let u = p.mu * stretch, v = p.mw;
-      u += Math.sin(u * 0.012 - t * 1.7) * 26;         // compression wave running along the flock
-      v += Math.sin(u * 0.009 + t * 0.9) * 38;          // slow S-bend
+      u += Math.sin(u * 0.012 - t * 1.7) * waveU;      // compression wave running along the flock
+      v += Math.sin(u * 0.009 + t * 0.9) * waveV;       // slow S-bend
       const vy = v * ct, uu = u + (p.mg ? split : -split * 0.55);
       const tx = cx + uu * cr - vy * sr, ty = cy + uu * sr + vy * cr;
       if (p.mx == null) { p.mx = tx; p.my = ty; }
@@ -581,7 +685,7 @@
       p.mx += (tx - p.mx) * f; p.my += (ty - p.my) * f;
       const sp = lits[i % ns]; if (!sp) continue;
       const r = 2.2 + p.ms * 1.1;
-      ctx.globalAlpha = Math.min(1, 0.5 * dense * p.mb) * w;
+      ctx.globalAlpha = Math.min(1, 0.5 * dense * p.mb * shine) * w;
       ctx.drawImage(sp, p.mx - r, p.my - r, r * 2, r * 2);
     }
     ctx.globalAlpha = 1;
@@ -595,19 +699,23 @@
   // along one family of Fibonacci spirals (seeds 13, 21 or 34 apart are neighbours).
   const GOLDEN = Math.PI * (3 - Math.sqrt(5));
   let golPh = 0, golDir = 1, golFam = 21;
+  const golHist = new Float32Array(128).fill(0.5); let golAt = 0;   // recent bass, newest at golAt
   function mGolden(pool, w) {
+    golAt = (golAt + 1) & 127; golHist[golAt] = A.bass + A.beat * 0.4;
     const ns = Math.max(1, sharps.length), t = tNow, n = Math.min(pool.length, 200);
     const theta = GOLDEN + Math.sin(t * 0.031 + golPh) * 0.0105 + Math.sin(t * 0.083) * 0.0028;
     const spin = t * 0.035 * golDir;
     const cx = W / 2, cy = ART_CY, c = 42, i0 = 14.5;   // i0 opens a hole the size of the art
     ctx.globalCompositeOperation = 'lighter';
     for (let i = 0; i < n; i++) {
-      const r = c * Math.sqrt(i + i0) * (1 + Math.sin(t * 0.55 - i * 0.045) * 0.035);   // outward pulse
+      const echo = golHist[(golAt - ((i * 0.45) | 0)) & 127];   // seed i sees the bass of i*0.45 frames ago
+      const r = c * Math.sqrt(i + i0) * (1 + Math.sin(t * 0.55 - i * 0.045) * 0.035) * amp(echo, 0.3);   // outward pulse
       const a = i * theta + spin;
       const x = cx + Math.cos(a) * r, y = cy + Math.sin(a) * r;
       if (x < -30 || x > W + 30 || y < -30 || y > H + 30) continue;
       const arm = i % golFam;
-      const lit = 0.5 + 0.5 * Math.sin(arm / golFam * 6.2832 - t * 0.9);
+      const lit0 = 0.5 + 0.5 * Math.sin(arm / golFam * 6.2832 - t * 0.9);
+      const lit = Math.min(1, lit0 + (A.bands[(arm * NB / golFam) | 0] - lit0) * A.mix * 0.8 + A.beat * 0.3);
       const sp = sharps[arm % ns]; if (!sp) continue;
       const sz = (9 + Math.sqrt(i) * 1.5) * (0.75 + lit * 0.5);
       ctx.globalAlpha = (0.20 + lit * 0.55) * w;
@@ -624,7 +732,7 @@
   // interval begins.
   const INTERVALS = [[2, 3, 'perfect fifth'], [3, 4, 'perfect fourth'], [4, 5, 'major third'],
                      [5, 6, 'minor third'], [3, 5, 'major sixth'], [1, 2, 'octave'], [5, 8, 'minor sixth']];
-  let paper = null, px = null, harm = null;
+  let paper = null, px = null, harm = null, harmAmp = 1;
   function newSwing() {
     const iv = INTERVALS[(rnd() * INTERVALS.length) | 0];
     const base = 0.55 + rnd() * 0.25;
@@ -638,13 +746,15 @@
   }
   function harmAt(h, tau, ph) {
     const d = Math.exp(-tau / (h.life * 1.25));        // the swing decays to ~45% before it ends
-    return [W / 2 + h.ax * d * (Math.sin(h.fx * tau + h.px + ph) + 0.22 * Math.sin(2 * h.fx * tau + h.qx)) / 1.22,
-            H / 2 + h.ay * d * (Math.sin(h.fy * tau + h.py) + 0.22 * Math.sin(2 * h.fy * tau + h.qy + ph)) / 1.22];
+    const e = harmAmp;
+    return [W / 2 + h.ax * d * e * (Math.sin(h.fx * tau + h.px + ph) + 0.22 * Math.sin(2 * h.fx * tau + h.qx)) / 1.22,
+            H / 2 + h.ay * d * e * (Math.sin(h.fy * tau + h.py) + 0.22 * Math.sin(2 * h.fy * tau + h.qy + ph)) / 1.22];
   }
   function mHarmonograph(pool, w, dt, mv) {
     if (!paper) { paper = document.createElement('canvas'); paper.width = W; paper.height = H; px = paper.getContext('2d'); }
     if (!harm) newSwing();
     const h = harm, step = dt * mv;
+    harmAmp = amp(A.energy, 0.35);
     const ns = Math.max(1, sprites.length), nsh = Math.max(1, lits.length);
 
     // The paper fades in coarse steps, not a sliver every frame: an 8-bit channel can't lose less
@@ -674,7 +784,7 @@
         for (let j = 1; j <= steps; j++) {
           const [x, y] = harmAt(h, t0 + (h.tau - t0) * j / steps, ph);
           if (soft) { px.globalAlpha = 0.22; px.drawImage(soft, x - 5.5, y - 5.5, 11, 11); }
-          if (core) { px.globalAlpha = 0.75; px.drawImage(core, x - 1.8, y - 1.8, 3.6, 3.6); }
+          if (core) { px.globalAlpha = Math.min(1, 0.75 * amp(A.treble, 0.5)); px.drawImage(core, x - 1.8, y - 1.8, 3.6, 3.6); }
         }
       }
       px.globalAlpha = 1;
@@ -686,7 +796,8 @@
     if (!wipe) {                                        // the glowing nibs, on top of their ink
       for (let pen = 0; pen < 2; pen++) {
         const [x, y] = harmAt(h, h.tau, pen * 1.5708), core = lits[(h.ci + pen) % nsh];
-        if (core) { ctx.globalAlpha = 0.9 * w; ctx.drawImage(core, x - 7, y - 7, 14, 14); }
+        const nib = 14 * (1 + A.beat * 0.9);
+        if (core) { ctx.globalAlpha = 0.9 * w; ctx.drawImage(core, x - nib / 2, y - nib / 2, nib, nib); }
       }
     }
     // the interval, named briefly as each swing begins (top-left, mirroring the mode label)
@@ -699,6 +810,103 @@
       ctx.fillText(`${h.iv[2]}  ·  ${h.iv[0]}:${h.iv[1]}`, 112, 74);
     }
     ctx.globalAlpha = 1;
+  }
+
+  // ---- Halo ----------------------------------------------------------------------------------
+  // The spectrum as a ring of light around the cover: 24 bands mirrored left and right, bass
+  // meeting at the top and treble at the bottom (shorter bars there keep the titles clear), each
+  // bar as long as its band is loud, with a falling peak cap. Every bar is the same pre-tinted
+  // sprite blitted under a rotation — no strokes, which cost ~3ms a call on this panel.
+  let haloBars = null, haloCaps = null;
+  function buildHalo() {
+    haloBars = pal.acc.map(c0 => {
+      const c = lift(c0, 0.2), s2 = document.createElement('canvas'); s2.width = 128; s2.height = 24;
+      const g = s2.getContext('2d'), col = `${c[0] | 0},${c[1] | 0},${c[2] | 0}`;
+      const lg = g.createLinearGradient(0, 0, 128, 0);              // base dim, tip bright
+      lg.addColorStop(0, `rgba(${col},0.25)`); lg.addColorStop(0.85, `rgba(${col},0.95)`); lg.addColorStop(1, `rgba(${col},0.4)`);
+      g.fillStyle = lg; g.fillRect(0, 4, 128, 16);
+      const vg = g.createLinearGradient(0, 0, 0, 24);               // soft long edges
+      vg.addColorStop(0, 'rgba(0,0,0,1)'); vg.addColorStop(0.3, 'rgba(0,0,0,0)'); vg.addColorStop(0.7, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(0,0,0,1)');
+      g.globalCompositeOperation = 'destination-out'; g.fillStyle = vg; g.fillRect(0, 0, 128, 24);
+      return s2;
+    });
+    haloCaps = lits;
+  }
+  function mHalo(pool, w) {
+    if (!haloBars || haloBars.src !== pal) { buildHalo(); haloBars.src = pal; }
+    const cx = W / 2, cy = ART_CY, r0 = ART_SZ * 0.5 + 24, spin = Math.sin(tNow * 0.05) * 0.12;
+    const nb = haloBars.length, nc = Math.max(1, haloCaps.length), bw = 15 + A.beat * 5;
+    const textTop = ART_CY + ART_SZ / 2 + 12;           // bars pointing down stop above the title
+    ctx.globalCompositeOperation = 'lighter';
+    for (let side = -1; side <= 1; side += 2) {
+      for (let b = 0; b < NB; b++) {
+        const a = -Math.PI / 2 + spin + side * (b + 0.5) / NB * Math.PI;
+        const c = Math.cos(a), sn = Math.sin(a);
+        // the longest this bar can be: to the screen edge it points at (or the title block)
+        let reach = Math.abs(c) > 1e-3 ? (W / 2 - 14) / Math.abs(c) : 1e4;
+        if (sn < -1e-3) reach = Math.min(reach, (cy - 10) / (-sn * 0.86));
+        else if (sn > 1e-3) reach = Math.min(reach, Math.max(r0 + 20, (textTop - cy) / (sn * 0.86)));
+        const span = Math.max(20, reach - r0 - 10);
+        const v = A.bands[b], len = 8 + Math.pow(v, 2.2) * span;
+        ctx.setTransform(c, sn * 0.86, -sn, c * 0.86, cx, cy);     // a touch elliptical, like Bloom
+        ctx.globalAlpha = (0.55 + v * 0.45) * w;
+        ctx.drawImage(haloBars[b % nb], r0, -bw / 2, len, bw);
+        const cap = haloCaps[b % nc];
+        if (cap) { const pk = 8 + Math.pow(A.peaks[b], 2.2) * span; ctx.globalAlpha = 0.8 * w; ctx.drawImage(cap, r0 + pk + 4, -6, 12, 12); }
+      }
+    }
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalAlpha = 1;
+  }
+
+  // ---- Scope ---------------------------------------------------------------------------------
+  // The waveform itself, bent into a ring around the cover — an oscilloscope trace that closes on
+  // itself. The tap starts each capture at a rising zero-crossing so steady tones hold still;
+  // samples are smoothed across neighbours and a little across frames, then stroked as a wide
+  // soft pass and a thin bright core, with a second, fainter trace a quarter-turn behind.
+  const scopeS = new Float32Array(NW);
+  function scopeRing(r0, k, off, spin) {
+    const N = NW * 2;
+    ctx.beginPath();
+    for (let j = 0; j <= N; j++) {
+      const jj = j % N, i0 = jj < NW ? jj : N - 1 - jj;            // there and back: the loop closes
+      const i = (i0 + off) % NW;
+      const v = (scopeS[(i + NW - 1) % NW] + 2 * scopeS[i] + scopeS[(i + 1) % NW]) / 4;
+      const a = spin + (j / N) * Math.PI * 2, r = r0 + v * k;
+      const x = W / 2 + Math.cos(a) * r, y = ART_CY + Math.sin(a) * r * 0.86;
+      if (j) ctx.lineTo(x, y); else ctx.moveTo(x, y);
+    }
+  }
+  function mScope(pool, w, dt) {
+    for (let i = 0; i < NW; i++) scopeS[i] += (A.wave[i] - scopeS[i]) * Math.min(1, dt * 45);
+    const c0 = pal.acc[0] || [200, 220, 255], c1 = pal.acc[1] || c0;
+    const k = 300 * (amp(A.energy, 0.8) + A.beat * 0.9);
+    const spin = tNow * 0.06, r0 = ART_SZ * 0.5 + 58 + (A.bass - 0.5) * 70 + A.beat * 34;
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.lineJoin = 'round';
+    scopeRing(r0 + 30, k * 0.8, NW >> 2, -spin * 0.7);
+    ctx.strokeStyle = `rgba(${c1[0] | 0},${c1[1] | 0},${c1[2] | 0},${(0.35 * w).toFixed(3)})`; ctx.lineWidth = 2; ctx.stroke();
+    scopeRing(r0, k, 0, spin);
+    ctx.strokeStyle = `rgba(${c0[0] | 0},${c0[1] | 0},${c0[2] | 0},${(0.22 * w).toFixed(3)})`; ctx.lineWidth = 10; ctx.stroke();
+    const hi = lift(c0, 0.5);
+    ctx.strokeStyle = `rgba(${hi[0] | 0},${hi[1] | 0},${hi[2] | 0},${(0.9 * w).toFixed(3)})`; ctx.lineWidth = 2.5 + A.beat * 2; ctx.stroke();
+    scrimText(w * 0.75);                                // the trace now swings across the titles
+    ctx.globalAlpha = 1;
+  }
+
+  // the dark pool behind the title block, shared by modes that draw right up to the text
+  let kalScrim = null;
+  function scrimText(w) {
+    if (!kalScrim) {
+      kalScrim = document.createElement('canvas'); kalScrim.width = kalScrim.height = 256;
+      const g = kalScrim.getContext('2d'), rg = g.createRadialGradient(128, 128, 0, 128, 128, 128);
+      rg.addColorStop(0, 'rgba(0,0,0,0.78)'); rg.addColorStop(0.55, 'rgba(0,0,0,0.5)'); rg.addColorStop(1, 'rgba(0,0,0,0)');
+      g.fillStyle = rg; g.fillRect(0, 0, 256, 256);
+    }
+    const ty = ART_CY + ART_SZ / 2 + 110;               // centre of the title/artist/album block
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = w;
+    ctx.drawImage(kalScrim, W / 2 - 520, ty - 150, 1040, 300);
   }
 
   function renderMode(id, pool, w, dt, mv, k) {
@@ -716,6 +924,8 @@
       case MUR: return mMurmur(pool, w, dt);
       case GOL: return mGolden(pool, w);
       case HAR: return mHarmonograph(pool, w, dt, mv);
+      case HALO: return mHalo(pool, w);
+      case SCOPE: return mScope(pool, w, dt);
     }
   }
 
@@ -792,6 +1002,11 @@
     }
   }
 
+  function nextAuto(i) {
+    do i = (i + 1) % MODES.length; while (AUDIO_ONLY.has(i) && A.mix < 0.5);
+    return i;
+  }
+
   function frame(ts) {
     if (!running) return;
     raf = requestAnimationFrame(frame);
@@ -801,7 +1016,9 @@
     if (!tPrev) tPrev = ts;
     let dt = (ts - tPrev) / 1000; tPrev = ts;
     if (dt > 0.1) dt = 0.1;
-    const moving = st.paused ? 0.22 : 1;          // paused: keep drifting slowly, never freeze
+    updateAudio(dt, ts);
+    // paused: keep drifting slowly, never freeze. Playing: louder passages move faster.
+    const moving = st.paused ? 0.22 : amp(A.energy, 0.7);
     tNow += dt * moving;
 
     const id = st.uri || '';
@@ -826,13 +1043,13 @@
       autoT += dt * moving;
       if (autoT >= HOLD + FADE) {
         autoT -= HOLD + FADE;
-        autoIdx = (autoIdx + 1) % MODES.length;
+        autoIdx = nextAuto(autoIdx);
         const sw = poolA; poolA = poolB; poolB = sw;   // the faded-in pool becomes current
         autoNextReady = -1; modeUntil = tNow + 2;
       }
       curMode = autoIdx;
       if (autoT > HOLD) {
-        nxtMode = (autoIdx + 1) % MODES.length;
+        nxtMode = nextAuto(autoIdx);
         mixW = (autoT - HOLD) / FADE;
         if (autoNextReady !== nxtMode) { initFor(nxtMode, poolB); autoNextReady = nxtMode; }
       }
@@ -848,7 +1065,7 @@
     if (nxtMode >= 0) renderMode(nxtMode, poolB, mixW, dt, moving, k);
 
     ctx.globalCompositeOperation = 'source-over';
-    drawArt(W / 2, ART_CY, ART_SZ * (1 + Math.sin(tNow * 0.55) * 0.013));
+    drawArt(W / 2, ART_CY, ART_SZ * (1 + Math.sin(tNow * 0.55) * 0.013));   // the cover stays still: no beat pulse
     drawInfo(st);
 
     // progress line + position marker; shows the seek target while scrubbing
@@ -882,6 +1099,23 @@
       ctx.font = '20px system-ui, sans-serif';
       ctx.fillText('Paused', W / 2, barY - 16);
     }
+    if (flashT > 0) {                                   // ♥ etc. over the cover, rising and fading
+      flashT -= dt;
+      const f = Math.max(0, flashT / 1.3);
+      ctx.globalAlpha = Math.min(1, f * 2);
+      ctx.textAlign = 'center'; ctx.fillStyle = '#fff';
+      ctx.font = `600 ${96 + (1 - f) * 40 | 0}px system-ui, sans-serif`;
+      ctx.fillText(flashTxt, W / 2, ART_CY + 34 - (1 - f) * 30);
+      ctx.globalAlpha = 1;
+    }
+    const audioMode = mode === AUTO ? -1 : mode;
+    if ((AUDIO_ONLY.has(audioMode) && A.mix < 0.3) || (A.state === 'denied' && hintT > 0)) {
+      if (hintT > 0) hintT -= dt;
+      ctx.textAlign = 'left'; ctx.font = '20px system-ui, sans-serif';
+      ctx.fillStyle = 'rgba(255,255,255,0.55)';
+      ctx.fillText(A.state === 'denied' ? 'Audio access declined — the visualiser can’t hear the music'
+        : A.state === 'unavailable' ? 'Audio tap unavailable on this TV' : (st.paused ? 'Paused' : 'Listening…'), 112, 74);
+    }
     // mode name, briefly, after a cycle
     if (tNow < modeUntil) {
       ctx.globalAlpha = Math.min(1, modeUntil - tNow);
@@ -909,10 +1143,16 @@
       ctx.fillStyle = '#07070b'; ctx.fillRect(0, 0, W, H);
       host.hidden = false;
       running = true; tPrev = 0;
+      hintT = 6;
+      try {
+        if (window.AudioBridge) { AudioBridge.onmessage = e => onAudio(e.data); AudioBridge.postMessage('on'); }
+        else A.state = 'unavailable';
+      } catch (e) { A.state = 'unavailable'; }
       raf = requestAnimationFrame(frame);
     },
     stop() {
       running = false;
+      try { window.AudioBridge?.postMessage('off'); } catch (e) {}
       if (raf) { cancelAnimationFrame(raf); raf = 0; }
       const host = document.getElementById('viz');
       if (host) host.hidden = true;
@@ -928,5 +1168,10 @@
     },
     modeName: () => (mode === AUTO ? 'Auto' : MODES[mode]),
     setSeekPreview(ms) { seekPreview = ms; },
+    flash(txt) { flashTxt = txt; flashT = 1.3; },
+    _raw: () => ({ db: [...R.db].map(v => +v.toFixed(1)), lo: [...R.lo].map(v => +v.toFixed(1)), hi: [...R.hi].map(v => +v.toFixed(1)),
+                   lv: +R.lv.toFixed(3), lvAvg: +R.lvAvg.toFixed(3), beats: R.beats, fluxDev: +R.fluxDev.toFixed(2) }),
+    audio: () => ({ state: A.state, mix: +A.mix.toFixed(2), beat: +A.beat.toFixed(2), bass: +A.bass.toFixed(2),
+                    mid: +A.mid.toFixed(2), treble: +A.treble.toFixed(2), energy: +A.energy.toFixed(2), rms: R.rms }),
   };
 })();
